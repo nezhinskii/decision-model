@@ -1,0 +1,31 @@
+# Local environments and Python build outputs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Generated datasets, features, runs, checkpoints, tracking and backups
+/artifacts/
+/mlruns/
+/mlartifacts/
+
+# Tool and notebook caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Local credentials and machine-specific settings
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+*~
