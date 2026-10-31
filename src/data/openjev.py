@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 import pyarrow.parquet as pq
 
 from .sampling import Candidate
-from .schema import Option, Question, Target, context_id
+from .schema import Option, Question, Target, TargetKind, Task, context_id
 
 
 DATASET = "shenjunhao/OpenJevData-140k"
@@ -60,8 +60,8 @@ def convert(row: dict, index: int, revision: str) -> Question:
         raise ValueError(f"SFT row {index}: score values must align with options")
     return Question(
         id=question_id(index, revision), source_row=index, text=row["question"],
-        category=row["category"], task=row["task"],
+        category=row["category"], task=Task(row["task"]),
         options=[Option(id=o["id"], text=o["name"], criteria=o["criteria"]) for o in options],
-        target=Target(kind=row["answer"]["kind"], probabilities=probabilities),
+        target=Target(kind=TargetKind(row["answer"]["kind"]), probabilities=probabilities),
         score_values=scores,
     )

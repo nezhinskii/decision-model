@@ -1,7 +1,7 @@
 """Pool selected hidden states into flat question and option features."""
 
 from dataclasses import asdict, dataclass
-from typing import Literal
+from enum import StrEnum
 
 import torch
 
@@ -10,12 +10,17 @@ from .model import BackboneOutput
 from ..features import FeatureBatch
 
 
+class PoolingMode(StrEnum):
+    last = "last"
+    mean = "mean"
+
+
 @dataclass
 class PoolingConfig:
     """Pooling is independent of the decoder depths requested from the backbone."""
 
-    question: Literal["last", "mean"] = "last"
-    option: Literal["last", "mean"] = "last"
+    question: PoolingMode = PoolingMode.last
+    option: PoolingMode = PoolingMode.last
     include_context: bool = False
 
 

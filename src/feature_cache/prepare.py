@@ -69,8 +69,10 @@ def cache_records(features, examples) -> list[dict]:
                 "question_ids": [q.id for q in example.questions],
                 "option_ids": [o.id for q in example.questions for o in q.options],
                 "categories": [q.category for q in example.questions],
-                "tasks": [q.task for q in example.questions],
-                "target_kinds": [q.target.kind for q in example.questions],
+                # Keep storage as plain strings, not pickled enum instances, so
+                # torch.load(weights_only=True) needs no custom allowlist.
+                "tasks": [str(q.task) for q in example.questions],
+                "target_kinds": [str(q.target.kind) for q in example.questions],
                 "score_values": [q.score_values for q in example.questions],
             }
         )

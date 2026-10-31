@@ -7,15 +7,19 @@ import torch
 
 @dataclass
 class FeatureBatch:
-    """Real question/option rows with local indices; no supervision or padding."""
+    """Real rows with local indices; no supervision or padding.
+
+    Options are contiguous by question, questions contiguous by context, both in
+    ascending index order. Extractors/collators preserve this grouping contract.
+    """
 
     questions: torch.Tensor  # [questions, layers, hidden_size]
     options: torch.Tensor  # [options, layers, hidden_size]
-    option_to_question: torch.Tensor
-    question_to_context: torch.Tensor
-    contexts: list[torch.Tensor] | None
-    question_ids: list[str]
-    option_ids: list[str]
+    option_to_question: torch.Tensor  # [V], integer indices into questions.
+    question_to_context: torch.Tensor  # [Q], integer indices into contexts.
+    contexts: list[torch.Tensor] | None  # B tensors [T_b, D], variable token lengths.
+    question_ids: list[str]  # Q IDs, aligned with questions.
+    option_ids: list[str]  # V IDs, aligned with options; not globally unique alone.
     metadata: dict
 
     def to(self, device: str | torch.device) -> "FeatureBatch":

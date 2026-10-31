@@ -2,13 +2,29 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from enum import StrEnum
 
 import torch
 from huggingface_hub import resolve_revision
 from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 from .inputs import PackedBatch
+
+
+class ComputeDtype(StrEnum):
+    bfloat16 = "bfloat16"
+    float16 = "float16"
+    float32 = "float32"
+
+
+class Quantization(StrEnum):
+    none = "none"
+    nf4 = "nf4"
+
+
+class AttentionBackend(StrEnum):
+    sdpa = "sdpa"
+    eager = "eager"
 
 
 @dataclass
@@ -20,16 +36,16 @@ class BackboneConfig:
     cache_dir: Path = Path("artifacts/models/hub")
     local_files_only: bool = False
     device: str = "cuda:0"
-    dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
-    quantization: Literal["none", "nf4"] = "nf4"
-    attention_backend: Literal["sdpa", "eager"] = "sdpa"
+    dtype: ComputeDtype = ComputeDtype.bfloat16
+    quantization: Quantization = Quantization.nf4
+    attention_backend: AttentionBackend = AttentionBackend.sdpa
 
 
 @dataclass
 class BackboneOutput:
     """Selected 1-based depths; the final depth includes final normalization."""
 
-    hidden_states: dict[int, torch.Tensor]
+    hidden_states: dict[int, torch.Tensor]  # 1-based depth -> [B, L_max, D].
     metadata: dict
 
 

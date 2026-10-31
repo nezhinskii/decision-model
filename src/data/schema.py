@@ -2,9 +2,20 @@
 
 from dataclasses import dataclass
 import hashlib
-from typing import Literal
+from enum import StrEnum
 
 import pyarrow as pa
+
+
+class TargetKind(StrEnum):
+    hard = "hard"
+    soft = "soft"
+
+
+class Task(StrEnum):
+    choice = "choice"
+    score = "score"
+    noul = "noul"
 
 
 @dataclass
@@ -20,8 +31,8 @@ class Option:
 class Target:
     """Supervision aligned with option order; soft probabilities stay intact."""
 
-    kind: Literal["hard", "soft"]
-    probabilities: list[float]
+    kind: TargetKind
+    probabilities: list[float]  # K probabilities, aligned with this question's options.
 
 
 @dataclass
@@ -32,10 +43,10 @@ class Question:
     source_row: int
     text: str
     category: str
-    task: Literal["choice", "score", "noul"]
-    options: list[Option]
+    task: Task
+    options: list[Option]  # K options for this question.
     target: Target
-    score_values: list[float] | None = None
+    score_values: list[float] | None = None  # K numeric scores, not target probabilities.
 
 
 @dataclass
@@ -44,7 +55,7 @@ class Example:
 
     id: str
     context: str
-    questions: list[Question]
+    questions: list[Question]  # C questions sharing this context.
 
 
 def canonical_context(text: str) -> str:

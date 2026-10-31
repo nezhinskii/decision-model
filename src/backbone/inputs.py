@@ -1,13 +1,26 @@
 """Serialize decision examples and construct matching attention masks and positions."""
 
 from dataclasses import dataclass
-from typing import Literal
+from enum import StrEnum
 
 import torch
 
 from ..data.schema import Example
 
-AttentionMode = Literal["causal", "independent_questions", "independent_options"]
+class AttentionMode(StrEnum):
+    causal = "causal"
+    independent_questions = "independent_questions"
+    independent_options = "independent_options"
+
+
+class PromptFormat(StrEnum):
+    plain = "plain"
+    chat = "chat"
+
+
+class QuerySource(StrEnum):
+    question = "question"
+    decision = "decision"
 
 
 class InputTooLongError(ValueError):
@@ -18,9 +31,9 @@ class InputTooLongError(ValueError):
 class InputConfig:
     """Input settings that must be included in any future feature-cache key."""
 
-    attention: AttentionMode = "independent_options"
-    prompt_format: Literal["plain", "chat"] = "plain"
-    query_source: Literal["question", "decision"] = "question"
+    attention: AttentionMode = AttentionMode.independent_options
+    prompt_format: PromptFormat = PromptFormat.plain
+    query_source: QuerySource = QuerySource.question
     max_packed_tokens: int = 2048
 
 
@@ -46,9 +59,9 @@ class EncodedExample:
     """Unpadded tokens and block boundaries for inspection and extraction."""
 
     example: Example
-    input_ids: list[int]
-    blocks: list[Block]
-    positions: list[int]
+    input_ids: list[int]  # L unpadded token IDs.
+    blocks: list[Block]  # One entry per nonempty serialized segment.
+    positions: list[int]  # L position IDs, possibly reset between branches.
 
 
 @dataclass
@@ -58,11 +71,11 @@ class PackedBatch:
     For independent branches, True permits a query to read a key.
     """
 
-    samples: list[EncodedExample]
-    input_ids: torch.Tensor
-    position_ids: torch.Tensor
-    padding_mask: torch.Tensor
-    allowed_attention: torch.Tensor | None
+    samples: list[EncodedExample]  # B original encoded contexts.
+    input_ids: torch.Tensor  # [B, L_max], right-padded token IDs.
+    position_ids: torch.Tensor  # [B, L_max].
+    padding_mask: torch.Tensor  # [B, L_max], True for real tokens.
+    allowed_attention: torch.Tensor | None  # [B, 1, L_max, L_max], or None for causal.
     config: InputConfig
 
     @property

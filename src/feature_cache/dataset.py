@@ -15,12 +15,12 @@ class TrainingBatch:
     """Head inputs plus supervision; targets follow features.options row order."""
 
     features: FeatureBatch
-    targets: torch.Tensor
-    context_ids: list[str]
-    categories: list[str]
-    tasks: list[str]
-    target_kinds: list[str]
-    score_values: list[list[float] | None]
+    targets: torch.Tensor  # [V], probabilities normalized within each question.
+    context_ids: list[str]  # B context IDs.
+    categories: list[str]  # Q category labels.
+    tasks: list[str]  # Q task labels.
+    target_kinds: list[str]  # Q hard/soft labels.
+    score_values: list[list[float] | None]  # Q entries, each K_q values or None.
 
     def to(self, device: str | torch.device) -> "TrainingBatch":
         """Move tensors for head training while keeping IDs and labels as lists."""

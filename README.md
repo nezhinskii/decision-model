@@ -44,6 +44,7 @@ src/
   data/                  # common schema, source adapter, sampling and preparation
   backbone/              # packed inputs, lazy frozen loading and feature pooling
   feature_cache/         # feature cache preparation and training-batch loading
+  heads/                 # shared projections, processors and Pointer scoring
 notebooks/
   backbone.ipynb          # offline mask/shape checks; optional pretrained usage
 docs/                    # research plans and technical agreements
@@ -51,7 +52,8 @@ pyproject.toml
 uv.lock
 ```
 
-Model heads, training and evaluation modules will be added as implemented.
+See [the head guide](src/heads/README.md) for processors, ablations and cache usage.
+Training and evaluation commands will be added as implemented.
 See [the backbone guide](src/backbone/README.md) for input conventions and lazy
 loading. The notebook runs without downloads by default; pretrained loading is
 explicitly opt-in, and the main research checkpoint has not been selected yet.

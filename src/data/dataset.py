@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pyarrow.parquet as pq
 
-from .schema import Example, Option, Question, Target
+from .schema import Example, Option, Question, Target, TargetKind, Task
 
 
 def read_examples(path: Path) -> Iterator[Example]:
@@ -15,6 +15,8 @@ def read_examples(path: Path) -> Iterator[Example]:
             questions = []
             for question in row["questions"]:
                 question["options"] = [Option(**option) for option in question["options"]]
+                question["target"]["kind"] = TargetKind(question["target"]["kind"])
                 question["target"] = Target(**question["target"])
+                question["task"] = Task(question["task"])
                 questions.append(Question(**question))
             yield Example(id=row["id"], context=row["context"], questions=questions)
