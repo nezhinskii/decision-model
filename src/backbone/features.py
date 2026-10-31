@@ -7,6 +7,7 @@ import torch
 
 from .inputs import Block, PackedBatch
 from .model import BackboneOutput
+from ..features import FeatureBatch
 
 
 @dataclass
@@ -16,20 +17,6 @@ class PoolingConfig:
     question: Literal["last", "mean"] = "last"
     option: Literal["last", "mean"] = "last"
     include_context: bool = False
-
-
-@dataclass
-class FeatureBatch:
-    """Real questions/options only; downstream heads do not receive padded rows."""
-
-    questions: torch.Tensor  # [questions, layers, hidden_size]
-    options: torch.Tensor  # [options, layers, hidden_size]
-    option_to_question: torch.Tensor
-    question_to_context: torch.Tensor
-    contexts: list[torch.Tensor] | None
-    question_ids: list[str]
-    option_ids: list[str]
-    metadata: dict
 
 
 def pool(states: torch.Tensor, block: Block, mode: str) -> torch.Tensor:

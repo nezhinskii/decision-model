@@ -17,11 +17,14 @@ weights. Missing files are fetched into `artifacts/models/hub`; set
 `local_files_only=True` to prohibit network loading. No checkpoint is selected as
 the primary research model yet.
 
-A Hub revision is resolved from the configuration and reused for subsequent
+A Hub revision is explicitly resolved to a commit and reused for subsequent
 tokenizer/model loading. Pass a commit SHA for a pinned experiment. NF4 quantizes
 source weights on loading; the Hub cache retains the original checkpoint, not a
 second saved quantized model. Defaults are CUDA, BF16 compute and NF4. Use
 `quantization="none"`, `device="cpu"`, `dtype="float32"` for ordinary CPU loading.
+`backbone.describe()` returns checkpoint identity and text layout, resolving only
+configuration and revision without loading weights. Local directories have no
+Hub revision. In-memory models also work without Hub access.
 
 Native `attention="causal"` uses a 2D padding mask and lets the model construct
 its own causal/recurrent masks. It is not restricted to full-attention layers.
@@ -102,6 +105,9 @@ separators and padding. Option content includes its criteria. Decision always us
 the last token of its marker. Optional context memory comes from the final layer
 only; that layer must be requested. Returned metadata records input and pooling
 settings and the layer convention for future caching.
+The returned container is the shared `src.features.FeatureBatch`, also used by
+the cache reader. It contains head inputs only, without targets, and `.to(device)`
+preserves gradient connections for future trainable-backbone use.
 
 See [the notebook](../../notebooks/backbone.ipynb) for offline examples, mask plots,
 shape checks and packed/separate-forward comparisons. Its pretrained section is

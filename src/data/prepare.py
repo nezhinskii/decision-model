@@ -10,7 +10,8 @@ import tempfile
 import pyarrow as pa
 import pyarrow.parquet as pq
 import tyro
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
+from huggingface_hub import resolve_revision
 
 from ..backbone.inputs import InputBuilder, InputConfig
 from . import openjev
@@ -129,10 +130,11 @@ def prepare(config: PrepareConfig) -> Path:
             local_files_only=config.local_files_only,
             trust_remote_code=False,
         )
-        tokenizer_config = AutoConfig.from_pretrained(config.tokenizer_id, **hub)
-        hub["revision"] = (
-            getattr(tokenizer_config, "_commit_hash", None) or config.tokenizer_revision
-        )
+        if not Path(config.tokenizer_id).is_dir():
+            hub["revision"] = resolve_revision(
+                config.tokenizer_id, revision=config.tokenizer_revision,
+                cache_dir=hub["cache_dir"], local_files_only=config.local_files_only,
+            ).resolved
         tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_id, **hub)
         # Data selection uses plain text only. Reserve room for later chat
         # wrappers/Decision markers without binding the dataset to an experiment.

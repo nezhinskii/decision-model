@@ -124,7 +124,13 @@ def prepare(config: PrepareConfig) -> Path:
     settings = {
         "backbone": {
             key: resolved["backbone"][key]
-            for key in ("model_id", "revision", "dtype", "quantization", "attention_backend")
+            for key in (
+                "model_id",
+                "revision",
+                "dtype",
+                "quantization",
+                "attention_backend",
+            )
         },
         "inputs": resolved["inputs"],
         "pooling": resolved["pooling"],
@@ -134,9 +140,29 @@ def prepare(config: PrepareConfig) -> Path:
     manifest_path = destination / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
-        if (manifest.get("format_version") != 4 or manifest.get("settings") != settings
-                or manifest.get("source_files") != source_files):
-            raise ValueError(f"{destination} has different settings/data/format; choose a new --name")
+        previous_settings = manifest.get("settings")
+        # An old unpinned cache may be resumed with an explicitly supplied SHA.
+        # This is a user assertion of its origin; never infer it from today's main.
+        if (
+            not manifest.get("model_revision")
+            and config.backbone.revision
+            and previous_settings is not None
+        ):
+            previous_settings = {
+                **previous_settings,
+                "backbone": {
+                    **previous_settings["backbone"],
+                    "revision": config.backbone.revision,
+                },
+            }
+        if (
+            manifest.get("format_version") != 4
+            or previous_settings != settings
+            or manifest.get("source_files") != source_files
+        ):
+            raise ValueError(
+                f"{destination} has different settings/data/format; choose a new --name"
+            )
         for info in manifest["splits"].values():
             for part in info["parts"]:
                 if not (destination / part["file"]).is_file():
@@ -144,32 +170,63 @@ def prepare(config: PrepareConfig) -> Path:
         if manifest["complete"]:
             print(f"Already prepared: {destination}", flush=True)
             return destination
-        backbone = FrozenBackbone(replace(
-            config.backbone, revision=manifest["model_revision"]
-        ))
+        if (
+            not manifest.get("model_revision")
+            and not Path(config.backbone.model_id).is_dir()
+            and (
+                config.backbone.revision is None
+                or len(config.backbone.revision) != 40
+                or any(c not in "0123456789abcdef" for c in config.backbone.revision)
+            )
+        ):
+            raise ValueError(
+                "This unfinished cache has no pinned revision. Supply the original "
+                "checkpoint commit with --backbone.revision, or choose a new cache name."
+            )
+        backbone = FrozenBackbone(
+            replace(
+                config.backbone,
+                revision=manifest.get("model_revision") or config.backbone.revision,
+            )
+        )
+        if not manifest.get("model_revision"):
+            manifest["model_revision"] = backbone.describe()["revision"]
+            manifest["settings"] = settings
+            save_manifest(manifest_path, manifest)
     else:
         if destination.exists() and any(destination.iterdir()):
-            raise ValueError(f"{destination} has files but no manifest; choose a new --name")
+            raise ValueError(
+                f"{destination} has files but no manifest; choose a new --name"
+            )
         backbone = FrozenBackbone(config.backbone)
         # Pin a moving Hub revision before any shard is written or resumed.
-        backbone._load_config()
+        checkpoint = backbone.describe()
         destination.mkdir(parents=True, exist_ok=True)
         manifest = {
             "format_version": 4,
             "settings": settings,
             "config": resolved,
             "source_files": source_files,
-            "model_revision": backbone._revision,
-            "packages": {name: version(name) for name in (
-                "torch", "transformers", "bitsandbytes", "pyarrow"
-            )},
+            "model_revision": checkpoint["revision"],
+            "packages": {
+                name: version(name)
+                for name in ("torch", "transformers", "bitsandbytes", "pyarrow")
+            },
             "features": None,
             "complete": False,
-            "splits": {split: {
-                "contexts": 0, "questions": 0, "options": 0,
-                "processed_contexts": 0, "skipped_contexts": 0, "skipped_questions": 0,
-                "complete": False, "parts": [],
-            } for split in source_files},
+            "splits": {
+                split: {
+                    "contexts": 0,
+                    "questions": 0,
+                    "options": 0,
+                    "processed_contexts": 0,
+                    "skipped_contexts": 0,
+                    "skipped_questions": 0,
+                    "complete": False,
+                    "parts": [],
+                }
+                for split in source_files
+            },
         }
         save_manifest(manifest_path, manifest)
 
@@ -183,12 +240,20 @@ def prepare(config: PrepareConfig) -> Path:
         def register_part(path, payload):
             part = part_info(path, destination, payload)
             info["parts"].append(part)
-            for key in ("contexts", "questions", "options", "processed_contexts",
-                        "skipped_contexts", "skipped_questions"):
+            for key in (
+                "contexts",
+                "questions",
+                "options",
+                "processed_contexts",
+                "skipped_contexts",
+                "skipped_questions",
+            ):
                 info[key] += part[key]
             save_manifest(manifest_path, manifest)
-            tqdm.write(f"{split}: saved {path.name}, {info['contexts']} kept, "
-                       f"{info['skipped_contexts']} skipped contexts total")
+            tqdm.write(
+                f"{split}: saved {path.name}, {info['contexts']} kept, "
+                f"{info['skipped_contexts']} skipped contexts total"
+            )
 
         # Recover a shard renamed successfully just before a manifest interruption.
         path = destination / split / f"part-{len(info['parts']):05d}.pt"
@@ -202,16 +267,22 @@ def prepare(config: PrepareConfig) -> Path:
         # counts here would duplicate later questions after restarting.
         consumed = info["processed_contexts"]
         print(f"{split}: continuing after {consumed} processed contexts", flush=True)
-        remaining = islice(read_examples(config.dataset / source["file"]), consumed, None)
+        remaining = islice(
+            read_examples(config.dataset / source["file"]), consumed, None
+        )
         total = pq.ParquetFile(config.dataset / source["file"]).metadata.num_rows
-        with tqdm(total=total, initial=consumed, desc=split, unit="context") as progress:
-            progress.set_postfix(saved_shards=len(info["parts"]), skipped=info["skipped_contexts"])
+        with tqdm(
+            total=total, initial=consumed, desc=split, unit="context"
+        ) as progress:
+            progress.set_postfix(
+                saved_shards=len(info["parts"]), skipped=info["skipped_contexts"]
+            )
             while examples := list(islice(remaining, config.shard_size)):
                 if builder is None:
                     builder = InputBuilder(backbone.tokenizer, config.inputs)
                 records, skipped = [], []
                 for start in range(0, len(examples), config.batch_size):
-                    chunk = examples[start:start + config.batch_size]
+                    chunk = examples[start : start + config.batch_size]
                     encoded = []
                     for example in chunk:
                         try:
@@ -219,12 +290,16 @@ def prepare(config: PrepareConfig) -> Path:
                         except InputTooLongError as error:
                             # Only length rejection is recoverable. Malformed
                             # inputs, OOM and model errors must remain visible.
-                            skipped.append({
-                                "context_id": example.id,
-                                "question_ids": [q.id for q in example.questions],
-                                "categories": [q.category for q in example.questions],
-                                "reason": str(error),
-                            })
+                            skipped.append(
+                                {
+                                    "context_id": example.id,
+                                    "question_ids": [q.id for q in example.questions],
+                                    "categories": [
+                                        q.category for q in example.questions
+                                    ],
+                                    "reason": str(error),
+                                }
+                            )
                     if encoded:
                         batch = builder.pack(encoded)
                         output = backbone.forward(batch, layers=config.layers)
@@ -232,7 +307,11 @@ def prepare(config: PrepareConfig) -> Path:
                         if manifest["features"] is None:
                             manifest["features"] = features.metadata
                             save_manifest(manifest_path, manifest)
-                        records.extend(cache_records(features, [sample.example for sample in encoded]))
+                        records.extend(
+                            cache_records(
+                                features, [sample.example for sample in encoded]
+                            )
+                        )
                         del output, features
                     progress.update(len(chunk))
                 path = destination / split / f"part-{len(info['parts']):05d}.pt"
@@ -244,7 +323,9 @@ def prepare(config: PrepareConfig) -> Path:
                 temporary.replace(path)
                 register_part(path, payload)
                 del payload
-                progress.set_postfix(saved_shards=len(info["parts"]), skipped=info["skipped_contexts"])
+                progress.set_postfix(
+                    saved_shards=len(info["parts"]), skipped=info["skipped_contexts"]
+                )
         if not info["contexts"]:
             raise ValueError(f"Prepared split is empty: {split}")
         info["complete"] = True

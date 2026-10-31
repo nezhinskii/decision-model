@@ -94,6 +94,7 @@ from src.feature_cache.dataset import FeatureDataset, collate_features
 
 dataset = FeatureDataset(
     Path("artifacts/features/baseline_v1"), "train", shuffle=True, seed=42,
+    include_context=False,  # Enable only for heads using context-token memory.
 )
 loader = DataLoader(dataset, batch_size=32, collate_fn=collate_features)
 
@@ -101,8 +102,9 @@ for epoch in range(10):
     dataset.set_epoch(epoch)
     for batch in loader:
         batch = batch.to("cuda:0")
-        # batch.questions: [Q, R, D]; batch.options: [V, R, D]
-        # batch.option_to_question: [V]; batch.targets: [V]
+        features = batch.features  # Shared src.features.FeatureBatch, same as extraction.
+        # features.questions: [Q, R, D]; features.options: [V, R, D]
+        # features.option_to_question: [V]; batch.targets: [V]
         # A head must normalize scores separately within each question.
 ```
 
@@ -111,10 +113,21 @@ levels, with one shard resident per worker; it is not a global question shuffle.
 Do not pass `shuffle=True` to DataLoader for this iterable dataset. With multiple
 workers, leave `persistent_workers=False` so set_epoch reaches new worker copies.
 Targets remain distributions per question, not one distribution over the batch.
-`question_to_context` indexes the batch's context IDs. No model is instantiated
+`batch.features.question_to_context` indexes `batch.context_ids`. No model is instantiated
 or downloaded when reading the cache; only the head needs GPU memory.
 
-`batch.contexts` is a list of variable-length context tensors, or `None`.
+`batch.features.contexts` is a list of variable-length context tensors, or `None`.
 `batch.to(device)` also moves these tensors. A cross-attention head can select the
 memory for question `q` using `contexts[question_to_context[q]]`; padding and its
 mask, if required by the head, are not added by this collator.
+
+The reader defaults to `include_context=False`, dropping context features before
+batching. This avoids unnecessary GPU transfer; `.pt` still reads the shared
+shard from disk. Requesting context memory from a cache without it raises an error.
+`TrainingBatch` wraps the shared `FeatureBatch` with targets and evaluation labels;
+heads consume only `batch.features`. Dimensions and dtype are available directly
+from feature tensors, and layer numbers remain in `features.metadata`.
+
+Completed older caches with a null model revision remain readable and are not
+rewritten. Resuming an unfinished Hub cache with unknown revision requires an
+explicit original commit SHA; no current remote revision is guessed for it.

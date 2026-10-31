@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
+from huggingface_hub import resolve_revision
 from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 from .inputs import PackedBatch
@@ -54,13 +55,31 @@ class FrozenBackbone:
     def _load_config(self):
         """Resolve a moving reference once, before loading tokenizer or weights."""
         if self._hf_config is None:
+            if not Path(self.config.model_id).is_dir():
+                # ResolvedRevision is a str whose displayed value may still be
+                # 'main'. Persist .resolved, the immutable commit, not str(result).
+                resolved = resolve_revision(
+                    self.config.model_id,
+                    revision=self._revision,
+                    cache_dir=str(self.config.cache_dir),
+                    local_files_only=self.config.local_files_only,
+                )
+                self._revision = resolved.resolved
             self._hf_config = AutoConfig.from_pretrained(
                 self.config.model_id, **self._hub_kwargs()
             )
-            self._revision = (
-                getattr(self._hf_config, "_commit_hash", None) or self._revision
-            )
         return self._hf_config
+
+    def describe(self) -> dict:
+        """Resolve checkpoint identity and text layout without loading weights."""
+        config = self._load_config()
+        text = getattr(config, "text_config", config)
+        return {
+            "model_id": self.config.model_id,
+            "revision": self._revision,
+            "model_type": text.model_type,
+            "num_hidden_layers": text.num_hidden_layers,
+        }
 
     @property
     def tokenizer(self):
@@ -166,7 +185,9 @@ class FrozenBackbone:
             mask = batch.padding_mask.to(device)
         else:
             if batch.allowed_attention is None:
-                raise ValueError("Independent branches require an allowed-attention mask")
+                raise ValueError(
+                    "Independent branches require an allowed-attention mask"
+                )
             allowed = batch.allowed_attention.to(device)
             if model.config._attn_implementation == "sdpa":
                 # SDPA accepts True for allowed edges, avoiding a separate float mask.

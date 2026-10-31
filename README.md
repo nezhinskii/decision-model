@@ -40,6 +40,7 @@ and a cache-loading example.
 
 ```text
 src/
+  features.py            # shared feature tensors and links consumed by heads
   data/                  # common schema, source adapter, sampling and preparation
   backbone/              # packed inputs, lazy frozen loading and feature pooling
   feature_cache/         # feature cache preparation and training-batch loading
