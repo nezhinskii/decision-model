@@ -11,11 +11,19 @@ Install `uv` and an NVIDIA driver for GPU workloads, then run:
 uv sync --locked
 ```
 
-For notebook use, install the additional tools and select the project `.venv` kernel:
+The same installation includes GPU kernels, notebook tools and pytest. For
+notebooks, select the project `.venv` kernel; no dependency groups are required.
+
+## Checks
+
+Fast offline CPU checks:
 
 ```bash
-uv sync --locked --group notebooks
+uv run python -m pytest tests -q
 ```
+
+They use tiny synthetic data and temporary files, without downloading checkpoints
+or reading research artifacts. GPU performance is measured separately.
 
 ## Data preparation
 

@@ -15,6 +15,12 @@ dependencies = [
     "bitsandbytes>=0.50.2",
     "safetensors>=0.8.0",
     "tqdm>=4.67,<5",
+    "flash-linear-attention[cuda]>=0.6.0",
+    "ipykernel>=7.4.0",
+    "matplotlib>=3.11.2",
+    "nbclient>=0.11.0",
+    "nbformat>=5.11.1",
+    "pytest>=8,<10",
 ]
 
 [build-system]
@@ -32,13 +38,3 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 
-[dependency-groups]
-kernels = [
-    "flash-linear-attention[cuda]>=0.6.0",
-]
-notebooks = [
-    "ipykernel>=7.4.0",
-    "matplotlib>=3.11.2",
-    "nbclient>=0.11.0",
-    "nbformat>=5.11.1",
-]

@@ -114,3 +114,17 @@ dimension `256`, dropout `0`. These are starting configurations, not tuned value
 No training/evaluation command is included here. Existing feature caches need no
 conversion. With causal backbone features, earlier options can already influence
 later options; processor isolation does not remove information encoded upstream.
+
+## Fast CPU checks
+
+```bash
+uv run python -m pytest tests -q
+```
+
+Tiny synthetic tensors check packing/collation, grouped vs separate attention
+outputs and gradients, padding isolation, layer readouts and ablation backward
+passes. The full suite also checks input masks/positions/spans, feature extraction,
+a tiny random CPU decoder, cache roundtrips/resume/skips, data selection and
+checkpoint revision pinning. Cache lifecycle tests use temporary files and a fake
+backbone; no model downloads, GPU or real-cache scans occur. These checks do not
+measure CUDA performance or pretrained/NF4-backbone numerical correctness.
