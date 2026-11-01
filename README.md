@@ -61,7 +61,8 @@ uv.lock
 ```
 
 See [the head guide](src/heads/README.md) for processors, ablations and cache usage.
-Training and evaluation commands will be added as implemented.
+Training, resume, evaluation and local/remote MLflow commands are described in
+[the training guide](src/training/README.md).
 See [the backbone guide](src/backbone/README.md) for input conventions and lazy
 loading. The notebook runs without downloads by default; pretrained loading is
 explicitly opt-in, and the main research checkpoint has not been selected yet.
