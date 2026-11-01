@@ -10,6 +10,12 @@ import tyro
 from dotenv import load_dotenv
 
 
+REPORT_ARTIFACTS = (
+    "config.json", "resume_config.json", "provenance.json", "cache_summary.json",
+    "data_summary.json", "best.json", "evaluation.json",
+)
+
+
 def load_tracking_env():
     """Read repository-local credentials; explicit shell variables take precedence."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
@@ -136,15 +142,7 @@ def sync(run: Path, remote_uri: str):
         ]
         for start in range(0, len(missing), 500):
             remote.log_batch(remote_id, metrics=missing[start : start + 500])
-    for name in (
-        "config.json",
-        "resume_config.json",
-        "provenance.json",
-        "cache_summary.json",
-        "data_summary.json",
-        "best.json",
-        "evaluation.json",
-    ):
+    for name in REPORT_ARTIFACTS:
         if (run / name).exists():
             remote.log_artifact(remote_id, str(run / name))
     if source.info.status == "RUNNING":
@@ -170,7 +168,7 @@ class BackgroundSync:
     """One sender per run; requests coalesce while a transfer is in progress.
 
     Local MLflow remains the durable queue. Failed transfers retry in the
-    background; shutdown waits only briefly, never for an entire network timeout.
+    background; normal shutdown waits for the final transfer to finish.
     """
 
     def __init__(self, run, remote_uri, retry_seconds=60):
@@ -212,8 +210,12 @@ class BackgroundSync:
                     # either the transfer or this retry delay.
                     self.condition.wait(timeout=self.retry_seconds)
 
-    def close(self, timeout=5):
-        """Request a final snapshot, allowing at most timeout seconds to finish."""
+    def close(self, timeout=None):
+        """Wait for the final snapshot by default, including an in-flight transfer.
+
+        An explicit timeout is available to callers that deliberately want a
+        bounded wait; training/evaluation use the default complete wait.
+        """
         if self.thread is None:
             return
         with self.condition:

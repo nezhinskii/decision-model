@@ -6,6 +6,7 @@
 - `checkpoints.py`: atomic local `latest.pt` and best-model safetensors exports.
 - `tracking.py`: local MLflow first, optional DagsHub mirroring and retry CLI.
 - `evaluate.py`: separate linked evaluation runs loading best weights strictly.
+- `export.py`: import a run into local MLflow and produce a readable analysis JSON.
 
 ## Train
 
@@ -121,7 +122,9 @@ performed by one background sender. Training requests do not wait for network
 responses, and repeated requests coalesce while a transfer is running. Failures
 retry after 60 seconds (or when new data is requested). Remote progress updates
 at validation intervals, not every batch. Shutdown requests a final snapshot and
-waits at most five seconds; if the network is still busy, use the retry CLI later.
+waits until the sender finishes, including any preceding in-flight transfer.
+There is no five-second cutoff. A network failure still warns and leaves results
+locally for the retry CLI; shutdown does not retry an unavailable server forever.
 Local MLflow is the durable source for any unsent results. The standalone retry
 CLI remains synchronous. Do not run it concurrently with the background sender
 for the same run.
@@ -142,3 +145,46 @@ Evaluation checks the loaded weight hash/cache identity, logs current code/devic
 metadata and links `source_train_run_id`. Add `--remote-uri URL` to mirror this
 evaluation run too. Dedicated latency benchmarking and live LoRA training remain
 separate future entry points.
+
+## Import and analysis reports
+
+The following single-line command works in Bash and PowerShell. Replace `RUN_ID`
+with the remote MLflow run ID (run details in DagsHub, or `remote_run_id` in the
+training directory's `tracking.json`). Credentials load from the project `.env`.
+
+```text
+uv run --no-sync python -m src.training.export --source-uri https://dagshub.com/OWNER/REPOSITORY.mlflow --run-id RUN_ID --output artifacts/exports/run.json
+```
+
+By default this imports the selected run into `artifacts/mlflow/tracking.db`
+and writes an analysis report. The local copy contains full metric histories,
+parameters, source tags and our small JSON artifacts. Its start/end times and
+status match the source snapshot. Repeating the command reuses the imported run
+and adds missing points. Use only one importer at a time for the same run.
+Imports are tagged `imported_view_only=true`: they are for browsing, not training
+resume. Local training directories are not changed. Model weights, feature caches
+and arbitrary source artifacts are not downloaded. Source parent-run IDs and
+machine-local directory tags are not reused as local MLflow links.
+
+The report contains full overall metric curves as `[step, value]` pairs, endpoint
+and extrema summaries, configuration, compact provenance and data/cache identity.
+Category/target breakdowns contain their latest values and values at the selected
+best step. It omits per-point timestamps and rounds numbers to six significant
+digits. Replayed steps use their latest timestamp in the report; MLflow retains
+every original point. Nonfinite values are explicit strings. Nothing in training
+reads this report: it can always be regenerated from MLflow.
+
+Optional flags:
+
+- `--no-import-local`: write only the analysis report.
+- `--max-points 32`: explicitly thin each curve, retaining endpoints and extrema.
+- `--local-db PATH`: choose the destination/read-default local MLflow database.
+
+Without `--source-uri`, the command reads the local database and does not clone
+the run. Both import and report cover one selected run; separately tracked test
+evaluations must be exported by their own run IDs. A linked ID alone does not
+include their metrics.
+
+Attach the output JSON for analysis. Open imported runs using the usual local
+MLflow server command above. No custom JSONL history or second training store is
+created.

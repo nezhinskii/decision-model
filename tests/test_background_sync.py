@@ -102,3 +102,62 @@ def test_no_remote_creates_no_thread(monkeypatch, tmp_path):
     sender.request()
     sender.close()
     assert sender.thread is None
+
+
+def test_default_close_waits_for_inflight_and_final_snapshot(monkeypatch, tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    final_started = threading.Event()
+    final_release = threading.Event()
+    closed = threading.Event()
+    calls = []
+
+    def blocked_sync(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(2)
+        else:
+            final_started.set()
+            assert final_release.wait(2)
+
+    monkeypatch.setattr(tracking, 'sync', blocked_sync)
+    sender = tracking.BackgroundSync(tmp_path, 'fake')
+
+    def close():
+        sender.close()
+        closed.set()
+
+    closer = threading.Thread(target=close)
+    try:
+        sender.request()
+        assert started.wait(2)
+        closer.start()
+        # Wait for close to publish the final request before releasing transfer 1.
+        with sender.condition:
+            assert sender.condition.wait_for(lambda: sender.closing, timeout=2)
+        assert not closed.is_set()
+        release.set()
+        assert final_started.wait(2)
+        assert not closed.is_set()
+        final_release.set()
+        assert closed.wait(2)
+        assert len(calls) == 2
+        assert not sender.thread.is_alive()
+    finally:
+        release.set()
+        final_release.set()
+        if closer.ident is not None:
+            closer.join(timeout=2)
+        sender.thread.join(timeout=2)
+
+
+def test_final_network_failure_warns_and_close_returns(monkeypatch, tmp_path):
+    def fail(*args):
+        raise ConnectionError('offline')
+
+    monkeypatch.setattr(tracking, 'sync', fail)
+    sender = tracking.BackgroundSync(tmp_path, 'fake')
+    with pytest.warns(UserWarning, match='local data is intact'):
+        sender.close()
+    assert not sender.thread.is_alive()
