@@ -104,7 +104,7 @@ two values. Tracking loads it automatically on Linux and Windows; existing shell
 variables take precedence. `.env` is ignored by Git and is never a run artifact.
 Do not put credentials into the URI or saved CLI config.
 
-Pass `--remote-uri URL` to training for synchronization after validation/end,
+Pass `--remote-uri URL` to training for background synchronization after validation/end,
 or retry independently:
 
 ```bash
@@ -117,8 +117,14 @@ Sync mirrors local parameters, tags, full metric histories and an explicit
 allowlist of small JSON files. A source-local-run tag links distinct server IDs.
 Existing metric points are deduplicated on retry; only one sync process per run
 should be active. Network failures warn without discarding local results. Sync is
-synchronous and may wait on network timeouts; it is not a background streaming
-service. Remote progress updates at validation intervals, not every batch.
+performed by one background sender. Training requests do not wait for network
+responses, and repeated requests coalesce while a transfer is running. Failures
+retry after 60 seconds (or when new data is requested). Remote progress updates
+at validation intervals, not every batch. Shutdown requests a final snapshot and
+waits at most five seconds; if the network is still busy, use the retry CLI later.
+Local MLflow is the durable source for any unsent results. The standalone retry
+CLI remains synchronous. Do not run it concurrently with the background sender
+for the same run.
 Model weights and caches are never in the upload allowlist.
 
 Resume can replay steps newer than the last snapshot; their earlier metrics remain

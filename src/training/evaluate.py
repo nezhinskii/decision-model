@@ -16,7 +16,7 @@ from ..heads import build_head
 from .checkpoints import load_model, weight_hash
 from .loop import evaluate
 from .train_head import TrainConfig, make_loader
-from .tracking import Tracker, try_sync, write_json
+from .tracking import Tracker, BackgroundSync, write_json
 from .provenance import check_cache
 
 
@@ -63,6 +63,7 @@ def evaluate_checkpoint(config: EvaluateConfig):
             "split": config.split,
         },
     )
+    sender = BackgroundSync(root, config.remote_uri)
     try:
         metrics = evaluate(model, loader, accelerator)
         tracker.log(metrics, best["step"])
@@ -93,7 +94,7 @@ def evaluate_checkpoint(config: EvaluateConfig):
         tracker.status("FAILED")
         raise
     finally:
-        try_sync(root, config.remote_uri)
+        sender.close()
     return metrics
 
 

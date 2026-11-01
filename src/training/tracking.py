@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import time
 import warnings
+import threading
 
 import tyro
 from dotenv import load_dotenv
@@ -163,6 +164,66 @@ def try_sync(run, remote_uri):
             sync(run, remote_uri)
         except Exception as error:
             warnings.warn(f"Remote metrics pending; local data is intact: {error}")
+
+
+class BackgroundSync:
+    """One sender per run; requests coalesce while a transfer is in progress.
+
+    Local MLflow remains the durable queue. Failed transfers retry in the
+    background; shutdown waits only briefly, never for an entire network timeout.
+    """
+
+    def __init__(self, run, remote_uri, retry_seconds=60):
+        self.run = run
+        self.remote_uri = remote_uri
+        self.retry_seconds = retry_seconds
+        self.condition = threading.Condition()
+        self.pending = False
+        self.closing = False
+        self.thread = None
+        if remote_uri:
+            self.thread = threading.Thread(target=self._work, daemon=True,
+                                           name="mlflow-sync")
+            self.thread.start()
+
+    def request(self):
+        """Signal new local data without waiting for network activity."""
+        if self.thread is not None:
+            with self.condition:
+                self.pending = True
+                self.condition.notify()
+
+    def _work(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(lambda: self.pending or self.closing)
+                if not self.pending:
+                    return
+                self.pending = False
+            try:
+                sync(self.run, self.remote_uri)
+            except Exception as error:
+                warnings.warn(f"Remote metrics pending; local data is intact: {error}")
+                with self.condition:
+                    if self.closing:
+                        return
+                    self.pending = True
+                    # Condition.wait releases the lock: training never waits on
+                    # either the transfer or this retry delay.
+                    self.condition.wait(timeout=self.retry_seconds)
+
+    def close(self, timeout=5):
+        """Request a final snapshot, allowing at most timeout seconds to finish."""
+        if self.thread is None:
+            return
+        with self.condition:
+            self.pending = True
+            self.closing = True
+            self.condition.notify()
+        self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            warnings.warn("Remote sync still pending; retry with src.training.tracking. "
+                          "All results are saved locally.")
 
 
 if __name__ == "__main__":

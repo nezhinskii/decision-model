@@ -122,6 +122,12 @@ def test_interrupted_training_matches_uninterrupted_and_sync_is_idempotent(cache
     assert remote.get_run(extra.info.run_id).data.metrics['remote_only'] == 1.
     assert all('remote_only' not in r.data.metrics for r in
                local.search_runs([local.get_run(local_id).info.experiment_id]))
+    # The background worker can mirror real SQLite-backed MLflow clients too.
+    local.set_terminated(local_id, 'FINISHED')
+    sender = tracking.BackgroundSync(root, remote_uri)
+    sender.close(timeout=5)
+    assert not sender.thread.is_alive()
+    assert remote.get_run(run_id).info.status == 'FINISHED'
 
 
 def test_remote_failure_only_warns(monkeypatch, tmp_path):

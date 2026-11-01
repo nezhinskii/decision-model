@@ -22,7 +22,7 @@ from ..feature_cache.dataset import FeatureDataset, collate_features
 from ..heads import HeadConfig, build_head
 from .checkpoints import load_latest, save_latest, save_model, weight_hash
 from .loop import evaluate, train_step
-from .tracking import Tracker, try_sync, write_json
+from .tracking import Tracker, BackgroundSync, write_json
 from .provenance import cache_summary, data_summary, check_cache
 
 
@@ -213,6 +213,7 @@ def train(config: TrainConfig):
     else:
         save_latest(root / "latest.pt", model, optimizer, accelerator, progress)
     model.train()
+    sender = BackgroundSync(root, config.remote_uri)
 
     def validate():
         metrics = evaluate(model, val_loader, accelerator)
@@ -241,7 +242,7 @@ def train(config: TrainConfig):
             # fixed best.safetensors path that has just been replaced.
             if old and root / old["weights"] != weights:
                 (root / old["weights"]).unlink(missing_ok=True)
-        try_sync(root, config.remote_uri)
+        sender.request()
 
     try:
         for epoch in range(progress["epoch"], config.epochs):
@@ -333,7 +334,7 @@ def train(config: TrainConfig):
         tracker.status("KILLED" if sys.exc_info()[0] is KeyboardInterrupt else "FAILED")
         raise
     finally:
-        try_sync(root, config.remote_uri)
+        sender.close()
     return root
 
 
