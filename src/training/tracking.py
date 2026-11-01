@@ -5,14 +5,21 @@ from pathlib import Path
 import time
 import warnings
 import threading
+import hashlib
+from tempfile import TemporaryDirectory
 
 import tyro
 from dotenv import load_dotenv
-
+from tqdm.auto import tqdm
 
 REPORT_ARTIFACTS = (
-    "config.json", "resume_config.json", "provenance.json", "cache_summary.json",
-    "data_summary.json", "best.json", "evaluation.json",
+    "config.json",
+    "resume_config.json",
+    "provenance.json",
+    "cache_summary.json",
+    "data_summary.json",
+    "best.json",
+    "evaluation.json",
 )
 
 
@@ -100,60 +107,156 @@ class Tracker:
         self.local.set_terminated(self.run_id, status)
 
 
-def sync(run: Path, remote_uri: str):
-    """Mirror local histories, deduplicating by (step, timestamp, value).
+def history_digest(history):
+    """Compact acknowledgment of an exact prefix, including replayed steps."""
+    digest = hashlib.sha256()
+    for point in history:
+        digest.update(f"{point.step}:{point.timestamp}:{point.value!r}\n".encode())
+    return digest.hexdigest()
 
-    Remote auth uses MLFLOW_TRACKING_USERNAME/PASSWORD environment variables.
-    We never copy model files; artifacts are a fixed small allowlist.
+
+def sync(run: Path, remote_uri: str):
+    """Mirror histories in batches; acknowledge prefixes to avoid remote reads.
+
+    Before writing we mark the transfer incomplete. If it fails mid-request,
+    the next attempt reconciles actual remote histories instead of trusting
+    cursors. Only one sender may operate on a run at a time.
     """
     from mlflow.tracking import MlflowClient
+    from mlflow.entities import Param, RunTag
 
     run = Path(run)
     info_path = run / "tracking.json"
     info = json.loads(info_path.read_text())
     local = MlflowClient(tracking_uri=info["local_uri"])
-    remote, experiment = client(remote_uri, info["experiment"])
     identity = info["local_run_id"]
-    matches = remote.search_runs(
-        [experiment], filter_string=f"tags.source_local_run_id = '{identity}'"
-    )
-    remote_id = (
-        matches[0].info.run_id
-        if matches
-        else remote.create_run(
-            experiment,
-            tags={"source_local_run_id": identity},
-        ).info.run_id
-    )
     source = local.get_run(identity)
-    for key, value in source.data.tags.items():
-        remote.set_tag(remote_id, key, value)
-    for key, value in source.data.params.items():
-        remote.log_param(remote_id, key, value)
-    for key in source.data.metrics:
-        known = {
-            (m.step, m.timestamp, m.value)
-            for m in remote.get_metric_history(remote_id, key)
-        }
-        missing = [
-            m
-            for m in local.get_metric_history(identity, key)
-            if (m.step, m.timestamp, m.value) not in known
+    # Progress describes work items, not bytes: one artifact may require several
+    # HTTP requests. Keep the current operation visible during a slow request.
+    with tqdm(desc="DagsHub sync: connecting", total=1, unit="item") as bar:
+        remote, experiment = client(remote_uri, info["experiment"])
+        if info.get("remote_uri") == remote_uri and info.get("remote_run_id"):
+            target = remote.get_run(info["remote_run_id"])
+            if target.data.tags.get("source_local_run_id") != identity:
+                raise ValueError("Remote run does not match local run identity")
+        else:
+            matches = remote.search_runs(
+                [experiment], filter_string=f"tags.source_local_run_id = '{identity}'"
+            )
+            target = (
+                matches[0]
+                if matches
+                else remote.create_run(
+                    experiment, tags={"source_local_run_id": identity}
+                )
+            )
+        remote_id = target.info.run_id
+        # Persist the association early, so a failed upload does not lose it.
+        info.update(remote_run_id=remote_id, remote_uri=remote_uri)
+        write_json(info_path, info)
+        files = [name for name in REPORT_ARTIFACTS if (run / name).exists()]
+        bar.reset(total=len(source.data.metrics) + len(files) + 4)
+        interrupted = target.data.tags.get("decision_sync.in_progress") == "true"
+
+        bar.set_description("DagsHub sync: parameters/tags")
+        remote.set_tag(remote_id, "decision_sync.in_progress", "true")
+        params = [
+            Param(k, v)
+            for k, v in source.data.params.items()
+            if target.data.params.get(k) != v
         ]
+        tags = [
+            RunTag(k, v)
+            for k, v in source.data.tags.items()
+            if not k.startswith("decision_sync.") and target.data.tags.get(k) != v
+        ]
+        for start in range(0, max(len(params), len(tags)), 100):
+            remote.log_batch(
+                remote_id,
+                params=params[start : start + 100],
+                tags=tags[start : start + 100],
+            )
+        bar.update()
+
+        missing, acknowledgments = [], []
+        for key in source.data.metrics:
+            bar.set_description(f"DagsHub sync: history {key}")
+            history = sorted(
+                local.get_metric_history(identity, key),
+                key=lambda m: (m.step, m.timestamp, repr(m.value)),
+            )
+            cursor_key = f"decision_sync.metric.{key}"
+            saved = target.data.tags.get(cursor_key)
+            cursor = json.loads(saved) if saved else None
+            # Normal case: remote already has the first N exact points. No
+            # download of that metric history is needed, even after restarting.
+            if (
+                not interrupted
+                and cursor
+                and cursor[0] <= len(history)
+                and history_digest(history[: cursor[0]]) == cursor[1]
+            ):
+                pending = history[cursor[0] :]
+            elif key not in target.data.metrics:
+                pending = history
+            else:
+                # Old runs, replay inserted into an earlier step, or a previous
+                # interrupted upload need full reconciliation once.
+                known = {
+                    (m.step, m.timestamp, repr(m.value))
+                    for m in remote.get_metric_history(remote_id, key)
+                }
+                pending = [
+                    m
+                    for m in history
+                    if (m.step, m.timestamp, repr(m.value)) not in known
+                ]
+            missing.extend(pending)
+            acknowledgments.append(
+                RunTag(
+                    cursor_key,
+                    json.dumps(
+                        [len(history), history_digest(history)], separators=(",", ":")
+                    ),
+                )
+            )
+            bar.update()
+
+        bar.set_description(f"DagsHub sync: uploading {len(missing)} metric points")
         for start in range(0, len(missing), 500):
             remote.log_batch(remote_id, metrics=missing[start : start + 500])
-    for name in REPORT_ARTIFACTS:
-        if (run / name).exists():
-            remote.log_artifact(remote_id, str(run / name))
-    if source.info.status == "RUNNING":
-        remote.update_run(remote_id, status="RUNNING")
-    else:
-        remote.set_terminated(
-            remote_id, source.info.status, end_time=source.info.end_time
-        )
-    info["remote_run_id"] = remote_id
-    info["remote_uri"] = remote_uri
-    write_json(info_path, info)
+            bar.set_postfix(points=f"{min(start + 500, len(missing))}/{len(missing)}")
+        for start in range(0, len(acknowledgments), 100):
+            remote.log_batch(remote_id, tags=acknowledgments[start : start + 100])
+        bar.update()
+
+        # Snapshot bytes before hashing/uploading: best.json may change while
+        # training continues. The acknowledgment must refer to the uploaded bytes.
+        with TemporaryDirectory() as temporary:
+            for name in files:
+                data = (run / name).read_bytes()
+                checksum = hashlib.sha256(data).hexdigest()
+                tag = f"decision_sync.artifact.{name}"
+                if target.data.tags.get(tag) != checksum:
+                    bar.set_description(
+                        f"DagsHub sync: uploading {name} ({len(data)} B)"
+                    )
+                    path = Path(temporary) / name
+                    path.write_bytes(data)
+                    remote.log_artifact(remote_id, str(path))
+                    remote.set_tag(remote_id, tag, checksum)
+                bar.update()
+        bar.set_description("DagsHub sync: final status")
+        if source.info.status == "RUNNING":
+            remote.update_run(remote_id, status="RUNNING")
+        else:
+            remote.set_terminated(
+                remote_id, source.info.status, end_time=source.info.end_time
+            )
+        bar.update()
+        remote.set_tag(remote_id, "decision_sync.in_progress", "false")
+        bar.update()
+        bar.set_description(f"DagsHub sync: complete ({source.info.status})")
 
 
 def try_sync(run, remote_uri):
@@ -180,8 +283,9 @@ class BackgroundSync:
         self.closing = False
         self.thread = None
         if remote_uri:
-            self.thread = threading.Thread(target=self._work, daemon=True,
-                                           name="mlflow-sync")
+            self.thread = threading.Thread(
+                target=self._work, daemon=True, name="mlflow-sync"
+            )
             self.thread.start()
 
     def request(self):
@@ -218,14 +322,33 @@ class BackgroundSync:
         """
         if self.thread is None:
             return
+        tqdm.write("Local results saved. Waiting for final DagsHub synchronization...")
         with self.condition:
             self.pending = True
             self.closing = True
             self.condition.notify()
-        self.thread.join(timeout=timeout)
+        # A heartbeat remains visible even if one HTTP request is waiting on
+        # MLflow's internal retries. This does not impose a transfer deadline.
+        started = time.monotonic()
+        while self.thread.is_alive():
+            remaining = (
+                None if timeout is None else timeout - (time.monotonic() - started)
+            )
+            if remaining is not None and remaining <= 0:
+                break
+            self.thread.join(
+                timeout=min(15, remaining) if remaining is not None else 15
+            )
+            if self.thread.is_alive():
+                tqdm.write(
+                    f"DagsHub sync still running ({time.monotonic() - started:.0f}s); "
+                    "local results are safe."
+                )
         if self.thread.is_alive():
-            warnings.warn("Remote sync still pending; retry with src.training.tracking. "
-                          "All results are saved locally.")
+            warnings.warn(
+                "Remote sync still pending; retry with src.training.tracking. "
+                "All results are saved locally."
+            )
 
 
 if __name__ == "__main__":

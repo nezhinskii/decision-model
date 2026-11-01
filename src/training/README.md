@@ -125,6 +125,13 @@ at validation intervals, not every batch. Shutdown requests a final snapshot and
 waits until the sender finishes, including any preceding in-flight transfer.
 There is no five-second cutoff. A network failure still warns and leaves results
 locally for the retry CLI; shutdown does not retry an unavailable server forever.
+The terminal shows connection, metadata, metric history, upload and status phases,
+plus a waiting message every 15 seconds during final synchronization. Progress
+counts work items, not bytes. Parameters/tags and metric points are batched;
+unchanged JSON artifacts are skipped by content hash. Remote acknowledgment tags
+record each exact uploaded history prefix, so normal incremental sync does not
+download old histories. Interrupted writes and inserted/replayed points trigger
+reconciliation before retrying, preserving the full history without duplicates.
 Local MLflow is the durable source for any unsent results. The standalone retry
 CLI remains synchronous. Do not run it concurrently with the background sender
 for the same run.
