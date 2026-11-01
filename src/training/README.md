@@ -99,6 +99,9 @@ together when moving the tracking store.
 Create a public repository and use its MLflow endpoint:
 `https://dagshub.com/OWNER/REPOSITORY.mlflow`. Set credentials outside the repository:
 `MLFLOW_TRACKING_USERNAME` is your username and `MLFLOW_TRACKING_PASSWORD` your token.
+You can also copy `.env.example` to `.env` in the project root and fill in these
+two values. Tracking loads it automatically on Linux and Windows; existing shell
+variables take precedence. `.env` is ignored by Git and is never a run artifact.
 Do not put credentials into the URI or saved CLI config.
 
 Pass `--remote-uri URL` to training for synchronization after validation/end,

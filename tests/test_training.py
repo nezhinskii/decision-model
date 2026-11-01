@@ -130,3 +130,16 @@ def test_remote_failure_only_warns(monkeypatch, tmp_path):
     monkeypatch.setattr(tracking, 'sync', unavailable)
     with pytest.warns(UserWarning, match='local data is intact'):
         tracking.try_sync(tmp_path, 'https://example.invalid/project.mlflow')
+
+
+def test_tracking_reads_project_env_without_overriding_shell(monkeypatch, tmp_path):
+    monkeypatch.setattr(tracking, '__file__', str(tmp_path / 'src/training/tracking.py'))
+    monkeypatch.setenv('MLFLOW_TRACKING_PASSWORD', 'temporary')
+    monkeypatch.delenv('MLFLOW_TRACKING_PASSWORD', raising=False)
+    monkeypatch.setenv('MLFLOW_TRACKING_USERNAME', 'shell-user')
+    (tmp_path / '.env').write_text(
+        'MLFLOW_TRACKING_USERNAME=file-user\nMLFLOW_TRACKING_PASSWORD=test-token\n')
+    tracking.load_tracking_env()
+    import os
+    assert os.environ['MLFLOW_TRACKING_USERNAME'] == 'shell-user'
+    assert os.environ['MLFLOW_TRACKING_PASSWORD'] == 'test-token'

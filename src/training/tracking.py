@@ -6,6 +6,12 @@ import time
 import warnings
 
 import tyro
+from dotenv import load_dotenv
+
+
+def load_tracking_env():
+    """Read repository-local credentials; explicit shell variables take precedence."""
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 def write_json(path, value):
@@ -16,6 +22,7 @@ def write_json(path, value):
 
 
 def client(uri, experiment):
+    load_tracking_env()
     from mlflow.tracking import MlflowClient
 
     result = MlflowClient(tracking_uri=uri)
