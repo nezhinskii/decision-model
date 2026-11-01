@@ -3,8 +3,12 @@ revision = 3
 requires-python = "==3.11.*"
 resolution-markers = [
     "sys_platform == 'win32'",
-    "sys_platform == 'emscripten'",
-    "sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "sys_platform == 'linux'",
+    "sys_platform != 'linux' and sys_platform != 'win32'",
+]
+required-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "platform_machine == 'AMD64' and sys_platform == 'win32'",
 ]
 
 [[package]]
@@ -492,7 +496,8 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "bitsandbytes" },
-    { name = "flash-linear-attention", extra = ["cuda"] },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "flash-linear-attention", extra = ["cuda"], marker = "sys_platform == 'linux'" },
     { name = "huggingface-hub" },
     { name = "ipykernel" },
     { name = "matplotlib" },
@@ -507,6 +512,7 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "triton-windows", marker = "sys_platform == 'win32'" },
     { name = "tyro" },
 ]
 
@@ -514,7 +520,8 @@ dependencies = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.15.0" },
     { name = "bitsandbytes", specifier = ">=0.50.2" },
-    { name = "flash-linear-attention", extras = ["cuda"], specifier = ">=0.6.0" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'win32'", specifier = ">=0.6.0" },
+    { name = "flash-linear-attention", extras = ["cuda"], marker = "sys_platform == 'linux'", specifier = ">=0.6.0" },
     { name = "huggingface-hub", specifier = ">=2.2.0" },
     { name = "ipykernel", specifier = ">=7.4.0" },
     { name = "matplotlib", specifier = ">=3.11.2" },
@@ -529,6 +536,7 @@ requires-dist = [
     { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", specifier = ">=4.67,<5" },
     { name = "transformers", specifier = ">=4.51,<6" },
+    { name = "triton-windows", marker = "sys_platform == 'win32'", specifier = ">=3.6,<3.7" },
     { name = "tyro", specifier = ">=0.9,<1" },
 ]
 
@@ -2440,6 +2448,14 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/2c/96f92f3c60387e14cc45aed49487f3486f89ea27106c1b1376913c62abe4/triton-3.6.0-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:49df5ef37379c0c2b5c0012286f80174fcf0e073e5ade1ca9a86c36814553651", size = 176081190, upload-time = "2026-01-20T16:16:00.523Z" },
     { url = "https://files.pythonhosted.org/packages/e0/12/b05ba554d2c623bffa59922b94b0775673de251f468a9609bc9e45de95e9/triton-3.6.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e8e323d608e3a9bfcc2d9efcc90ceefb764a82b99dea12a86d643c72539ad5d3", size = 188214640, upload-time = "2026-01-20T16:00:35.869Z" },
+]
+
+[[package]]
+name = "triton-windows"
+version = "3.6.0.post26"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/20/acab7b4f50abe68d93f632b2e29cfb9e76284eaf9b4041a6eabbbd4afdc7/triton_windows-3.6.0.post26-cp311-cp311-win_amd64.whl", hash = "sha256:369a47ed3ca25f6d405387a058b8fbc62e6ff4592bbf87b0c5f6de372ab68931", size = 47401354, upload-time = "2026-03-10T02:51:33.9Z" },
 ]
 
 [[package]]

@@ -14,6 +14,13 @@ uv sync --locked
 The same installation includes GPU kernels, notebook tools and pytest. For
 notebooks, select the project `.venv` kernel; no dependency groups are required.
 
+Dependencies are selected automatically for Linux and Windows (x86-64).
+Linux uses FLA's CUDA extra and standard Triton; Windows uses FLA with
+`triton-windows` 3.6, matching PyTorch 2.11. Use the same `uv sync --locked`
+command on either platform. Windows kernel execution still depends on the GPU,
+driver and the Windows Triton runtime; resolving dependencies does not validate
+kernel execution.
+
 ## Checks
 
 Fast offline CPU checks:
