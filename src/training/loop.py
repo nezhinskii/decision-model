@@ -2,7 +2,7 @@
 
 import torch
 
-from .objectives import MetricTotals, question_metrics
+from .objectives import MetricTotals, question_metrics, LossConfig, training_values
 
 
 @torch.no_grad()
@@ -18,17 +18,18 @@ def evaluate(model, loader, accelerator):
     return totals.result()
 
 
-def train_step(model, batches, optimizer, accelerator, clip_grad):
+def train_step(model, batches, optimizer, accelerator, clip_grad, loss_config=None):
     """Accumulate microbatches weighted by questions, not by microbatch size."""
     questions = sum(len(batch.features.questions) for batch in batches)
     # Keep detached metric sums on device; transfer only at logging intervals.
     sums = None
+    loss_config = loss_config if loss_config is not None else LossConfig()
     optimizer.zero_grad(set_to_none=True)
     for batch in batches:
         batch = batch.to(accelerator.device)
         with accelerator.autocast():
-            values = question_metrics(model(batch.features), batch)
-            loss = values[:, 0].sum() / questions
+            values = training_values(model(batch.features), batch, loss_config)
+            loss = values[:, 3].sum() / questions
         accelerator.backward(loss)
         batch_sums = values.detach().sum(0)
         sums = batch_sums if sums is None else sums + batch_sums

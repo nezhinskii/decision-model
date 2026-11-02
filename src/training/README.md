@@ -35,6 +35,27 @@ Brier sums squared errors across options, then averages across questions.
 at epoch/limited-run end. `--max-steps` limits total steps, including resumed ones.
 Best model selection uses validation loss; test data is not read during training.
 
+### Training objective
+
+`--loss.ce-weight 1 --loss.brier-weight 0` preserves the original CE training.
+Weights are nonnegative and not normalized; at least one must be positive.
+For a mixture use `--loss.ce-weight 1 --loss.brier-weight 0.5`, or use weights
+`0` and `1` for Brier-only training.
+
+`--loss.label-smoothing 0.05` replaces hard targets with
+`(1-epsilon)*target + epsilon/K`, separately for each question's K options.
+Soft targets are preserved. `--loss.smoothing-scope both` (default) applies the
+smoothed target to both components. `--loss.smoothing-scope ce` smooths CE only,
+keeping Brier against the original target. With CE disabled, scope=ce makes
+smoothing irrelevant to the optimized objective.
+
+Train logs include `objective` (weighted training loss), `ce_component` and
+`brier_component` (before weighting). The existing `all/loss`, `all/brier`, and
+accuracy remain computed against original targets, as do all validation metrics.
+Best weights are still selected by original-target validation CE. Objective sums
+are weighted by question count across accumulation/logging intervals. Loss config
+is saved with the run and must match on resume; changing it requires a new name.
+
 ## Local outputs and resume
 
 ```text

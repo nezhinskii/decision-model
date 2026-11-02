@@ -25,6 +25,7 @@ from .loop import evaluate, train_step
 from .tracking import Tracker, BackgroundSync, write_json
 from .provenance import cache_summary, data_summary, check_cache
 from .schedules import ScheduleType, CosineSchedule
+from .objectives import LossConfig, TRAIN_METRIC_NAMES
 from math import ceil
 
 
@@ -39,6 +40,7 @@ class TrainConfig:
     cache: Path
     name: str
     head: HeadConfig = field(default_factory=HeadConfig)
+    loss: LossConfig = field(default_factory=LossConfig)
     output: Path = Path("artifacts/runs")
     tracking_db: Path = Path("artifacts/mlflow/tracking.db")
     experiment: str = "decision-heads"
@@ -263,7 +265,7 @@ def train(config: TrainConfig):
             iterator = iter(train_loader)
             for _ in range(progress["batch"]):
                 next(iterator)
-            interval_sums = None  # [3]: CE, accuracy, Brier sums on device.
+            interval_sums = None  # [6]: TRAIN_METRIC_NAMES sums on device.
             interval_questions = interval_steps = 0
             started = time.perf_counter()
             if accelerator.device.type == "cuda":
@@ -278,8 +280,8 @@ def train(config: TrainConfig):
                 averages = (interval_sums / interval_questions).cpu().tolist()
                 elapsed = time.perf_counter() - started
                 metrics = {
-                    f"train/all/{key}": value
-                    for key, value in zip(("loss", "accuracy", "brier"), averages)
+                    f"train/{key}": value
+                    for key, value in zip(TRAIN_METRIC_NAMES, averages)
                 }
                 metrics.update(
                     {
@@ -308,7 +310,7 @@ def train(config: TrainConfig):
                         break
                     used_lr = optimizer.param_groups[0]['lr']
                     sums, questions = train_step(
-                        model, batches, optimizer, accelerator, config.clip_grad
+                        model, batches, optimizer, accelerator, config.clip_grad, config.loss
                     )
                     if scheduler is not None and not accelerator.optimizer_step_was_skipped:
                         scheduler.step()
