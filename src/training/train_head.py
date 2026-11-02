@@ -26,6 +26,7 @@ from .tracking import Tracker, BackgroundSync, write_json
 from .provenance import cache_summary, data_summary, check_cache
 from .schedules import ScheduleType, CosineSchedule
 from .objectives import LossConfig, TRAIN_METRIC_NAMES
+from .early_stopping import EarlyStoppingConfig, EarlyStopping
 from math import ceil
 
 
@@ -41,6 +42,7 @@ class TrainConfig:
     name: str
     head: HeadConfig = field(default_factory=HeadConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
     output: Path = Path("artifacts/runs")
     tracking_db: Path = Path("artifacts/mlflow/tracking.db")
     experiment: str = "decision-heads"
@@ -228,13 +230,20 @@ def train(config: TrainConfig):
     else:
         save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
     model.train()
+    stopper = EarlyStopping(config.early_stopping, progress.get('early_stopping'))
+    progress['early_stopping'] = stopper.state
     sender = BackgroundSync(root, config.remote_uri)
 
     def validate():
+        if progress['step'] <= stopper.state['last_step']:
+            return
         metrics = evaluate(model, val_loader, accelerator)
         tracker.log(
             {f"validation/{k}": v for k, v in metrics.items()}, progress["step"]
         )
+        stopper.update(metrics['all/loss'], progress['step'])
+        tracker.log({'early_stopping/bad_checks': stopper.state['bad_checks'],
+                     'early_stopping/stopped': int(stopper.stopped)}, progress['step'])
         if metrics["all/loss"] < progress["best_loss"]:
             progress["best_loss"] = metrics["all/loss"]
             old = (
@@ -261,6 +270,8 @@ def train(config: TrainConfig):
 
     try:
         for epoch in range(progress["epoch"], config.epochs):
+            if stopper.stopped:
+                break
             train_loader.dataset.set_epoch(epoch)
             iterator = iter(train_loader)
             for _ in range(progress["batch"]):
@@ -327,6 +338,8 @@ def train(config: TrainConfig):
                     if progress["step"] % config.validate_every == 0:
                         log_interval()
                         validate()
+                        if stopper.stopped:
+                            break
                         if accelerator.device.type == "cuda":
                             torch.cuda.reset_peak_memory_stats()
                         started = time.perf_counter()
@@ -341,6 +354,11 @@ def train(config: TrainConfig):
                 log_interval()
             validate()
             save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
+            if stopper.stopped:
+                tqdm.write(f"Early stopping at step {progress['step']}: "
+                           f"{stopper.state['bad_checks']} checks without CE improvement "
+                           f"> {config.early_stopping.min_delta}. Best weights are saved.")
+                break
             if config.max_steps is not None and progress["step"] >= config.max_steps:
                 break
         tracker.status("FINISHED")

@@ -35,6 +35,20 @@ Brier sums squared errors across options, then averages across questions.
 at epoch/limited-run end. `--max-steps` limits total steps, including resumed ones.
 Best model selection uses validation loss; test data is not read during training.
 
+Early stopping uses original-target validation CE. Defaults are
+`--early-stopping.patience 8 --early-stopping.min-delta 0.0001`: eight distinct
+validation steps without an absolute improvement greater than 1e-4. Small changes
+accumulate relative to the last significant best value. Periodic and end-of-epoch
+validation at the same step count once. With 777 updates/epoch and validation every
+400 updates plus epoch end, eight checks give roughly 2–3 epochs of patience.
+Set `--early-stopping.patience 0` to disable. Patience/minimum/last step and stop
+state persist in latest.pt. Stopping saves the latest state and finishes normally;
+best.safetensors remains the model with the smallest raw validation CE, even if
+its improvement was below min_delta. Repeating an already early-stopped run does
+not start updating weights again. Early-stopping configuration must match on
+resume; use a new run for a different stopping policy. Cosine retains its original
+horizon when early stopping ends a run before the requested epoch limit.
+
 ### Training objective
 
 `--loss.ce-weight 1 --loss.brier-weight 0` preserves the original CE training.
