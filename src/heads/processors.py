@@ -174,7 +174,7 @@ class JointBlock(nn.Module):
             # Group all real queries sharing a context. Cross-attention never
             # mixes queries, so this shares K/V computation without mixing questions.
             real_queries = self.cross_norm(states)[valid]  # [S, d]
-            queries = states.new_zeros(
+            queries = real_queries.new_zeros(
                 (len(context.memory), context.max_queries, states.shape[-1])
             )
             queries[context.context_ids, context.positions] = (
@@ -187,7 +187,10 @@ class JointBlock(nn.Module):
                 key_padding_mask=context.padding_mask,
                 need_weights=False,
             )
-            update = torch.zeros_like(states)
+            # Autocast can return BF16 attention reads with FP32 residual states.
+            # Indexed writes require matching dtypes; residual addition handles
+            # promotion afterward while preserving gradients through the read.
+            update = read.new_zeros(states.shape)
             update[valid] = read[context.context_ids, context.positions]
             states = states + self.dropout(update)
 

@@ -24,6 +24,8 @@ from .checkpoints import load_latest, save_latest, save_model, weight_hash
 from .loop import evaluate, train_step
 from .tracking import Tracker, BackgroundSync, write_json
 from .provenance import cache_summary, data_summary, check_cache
+from .schedules import ScheduleType, CosineSchedule
+from math import ceil
 
 
 class MixedPrecision(StrEnum):
@@ -45,6 +47,9 @@ class TrainConfig:
     batch_size: int = 16
     accumulation_steps: int = 1
     learning_rate: float = 1e-4
+    schedule: ScheduleType = ScheduleType.constant
+    min_lr_ratio: float = 0.1
+    schedule_steps: int | None = None  # None uses all requested epochs, not max_steps.
     weight_decay: float = 0.01
     clip_grad: float = 1.0
     seed: int = 42
@@ -138,6 +143,13 @@ def train(config: TrainConfig):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
+    updates_per_epoch = ceil(ceil(train_loader.dataset.info['contexts'] / config.batch_size)
+                             / config.accumulation_steps)
+    total_schedule_steps = config.schedule_steps or updates_per_epoch * config.epochs
+    if config.schedule_steps is not None and config.schedule_steps < 1:
+        raise ValueError('schedule_steps must be positive')
+    scheduler = (CosineSchedule(optimizer, total_schedule_steps, config.min_lr_ratio)
+                 if config.schedule == ScheduleType.cosine else None)
     model, optimizer = accelerator.prepare(model, optimizer)
     config.tracking_db.parent.mkdir(parents=True, exist_ok=True)
     tracker = Tracker(
@@ -188,7 +200,8 @@ def train(config: TrainConfig):
                     name: version(name)
                     for name in ("accelerate", "safetensors", "mlflow", "pyarrow")
                 },
-                "learning_rate_schedule": "constant",
+                "learning_rate_schedule": str(config.schedule),
+                "schedule_steps": total_schedule_steps if scheduler is not None else None,
             }
         )
         write_json(root / "provenance.json", provenance)
@@ -200,7 +213,7 @@ def train(config: TrainConfig):
         tracker.artifact(root / "data_summary.json")
     progress = {"epoch": 0, "batch": 0, "step": 0, "best_loss": float("inf")}
     if resuming:
-        progress = load_latest(root / "latest.pt", model, optimizer, accelerator)
+        progress = load_latest(root / "latest.pt", model, optimizer, accelerator, scheduler)
         write_json(root / "resume_config.json", asdict(config))
         tracker.artifact(root / "resume_config.json")
         # A best export may be newer than the last periodic training snapshot.
@@ -211,7 +224,7 @@ def train(config: TrainConfig):
                 progress["best_loss"], best["metrics"]["all/loss"]
             )
     else:
-        save_latest(root / "latest.pt", model, optimizer, accelerator, progress)
+        save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
     model.train()
     sender = BackgroundSync(root, config.remote_uri)
 
@@ -270,7 +283,7 @@ def train(config: TrainConfig):
                 }
                 metrics.update(
                     {
-                        "train/learning_rate": optimizer.param_groups[0]["lr"],
+                        "train/learning_rate": used_lr,
                         "train/step_seconds": elapsed / interval_steps,
                         "train/questions_per_second": interval_questions / elapsed,
                     }
@@ -293,9 +306,12 @@ def train(config: TrainConfig):
                         and progress["step"] >= config.max_steps
                     ):
                         break
+                    used_lr = optimizer.param_groups[0]['lr']
                     sums, questions = train_step(
                         model, batches, optimizer, accelerator, config.clip_grad
                     )
+                    if scheduler is not None and not accelerator.optimizer_step_was_skipped:
+                        scheduler.step()
                     interval_sums = (
                         sums if interval_sums is None else interval_sums + sums
                     )
@@ -315,14 +331,14 @@ def train(config: TrainConfig):
                     if progress["step"] % config.save_every == 0:
                         log_interval()
                         save_latest(
-                            root / "latest.pt", model, optimizer, accelerator, progress
+                            root / "latest.pt", model, optimizer, accelerator, progress, scheduler
                         )
                         started = time.perf_counter()
                 else:
                     progress["epoch"], progress["batch"] = epoch + 1, 0
                 log_interval()
             validate()
-            save_latest(root / "latest.pt", model, optimizer, accelerator, progress)
+            save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
             if config.max_steps is not None and progress["step"] >= config.max_steps:
                 break
         tracker.status("FINISHED")

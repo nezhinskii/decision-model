@@ -66,7 +66,17 @@ a temporary file replaces the previous version after writing finishes.
 No checkpoint history is retained. Previous UUID-named best exports from older
 runs are removed on the next best-model update.
 The trainer state uses trusted-local PyTorch pickle; never load arbitrary external
-`latest.pt` files. There is no scheduler state because the initial schedule is constant.
+`latest.pt` files. Constant LR remains compatible with old checkpoints.
+
+For a new cosine run use `--schedule cosine --min-lr-ratio 0.1`. LR starts at
+`--learning-rate`, declines smoothly to 10% and stays there. No warmup/restarts
+are applied. Scheduler state is saved in `latest.pt`, and advances only after
+successful optimizer updates. Logged LR is the rate used for the last completed
+update in the interval. The horizon defaults to epochs times updates per epoch,
+including partial batches/accumulation groups. `--max-steps` pauses training
+without shortening that horizon. Set `--schedule-steps N` for an explicit horizon.
+Resuming must preserve it and the minimum ratio; changing epochs with an automatic
+cosine horizon raises an error. Use new run names when changing schedules.
 Training metrics are question-weighted averages over logging intervals; category
 breakdowns are computed during validation. Speed is wall time over each interval,
 including data loading but excluding validation/checkpoint pauses. CUDA peak
@@ -195,3 +205,18 @@ include their metrics.
 Attach the output JSON for analysis. Open imported runs using the usual local
 MLflow server command above. No custom JSONL history or second training store is
 created.
+
+To export a whole series, use an inclusive start-time boundary:
+
+```text
+uv run --no-sync python -m src.training.export --source-uri https://dagshub.com/OWNER/REPOSITORY.mlflow --since-run-id FIRST_RUN_ID --output artifacts/exports/series
+```
+
+This selects the anchor run and every nondeleted run in its MLflow experiment
+whose start time is at least the anchor's, including running/failed runs and
+timestamp ties. IDs themselves are not ordered. Other experiments are excluded.
+All result pages are read. `--output` is a directory in this mode: each report is
+named `<run_id>.json`, and `index.json` maps IDs to names, status, best results and
+report paths. Import into local MLflow remains enabled by default; add
+`--no-import-local` for JSON reports only. Individual failures are recorded in the
+index and remaining runs continue; the command exits nonzero if any failed.

@@ -24,6 +24,24 @@ def features():
 
 
 class TestHeads:
+    @pytest.mark.parametrize('slots', [0, 16])
+    @pytest.mark.parametrize('norm', [NormType.layernorm, NormType.rmsnorm])
+    def test_cross_attention_bf16_autocast_forward_and_backward(self, slots, norm):
+        data = features()
+        head = build_head(8, HeadConfig(
+            processor=ProcessorType.joint, dim=8, hidden_dim=16,
+            attention_heads=2, num_slots=slots, score_dim=4,
+            norm_type=norm, dropout=.1), num_feature_layers=3)
+        with torch.autocast('cpu', dtype=torch.bfloat16):
+            logits = head(data)
+            loss = logits.float().square().mean()
+        assert logits.shape == (6,)
+        assert torch.isfinite(logits).all()
+        loss.backward()
+        for parameter in head.parameters():
+            assert parameter.grad is not None
+            assert torch.isfinite(parameter.grad).all()
+
     def test_pack_restores_values_and_gradients(self):
         rows = torch.randn(6, 8, requires_grad=True)
         groups = torch.tensor([0, 0, 2, 2, 2, 3])  # Includes an empty group.

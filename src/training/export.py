@@ -1,6 +1,6 @@
-"""Import one MLflow run locally and write a compact, disposable analysis report."""
+"""Import MLflow runs locally and write disposable analysis reports."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -8,16 +8,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import tyro
+from tqdm.auto import tqdm
 
-from .tracking import REPORT_ARTIFACTS, client, load_tracking_env
+from .tracking import REPORT_ARTIFACTS, client, load_tracking_env, write_json
 
 
 @dataclass
 class ExportConfig:
-    run_id: str
+    run_id: str | None = None
+    since_run_id: str | None = None  # Inclusive start-time boundary in its experiment.
     source_uri: str | None = None  # None reads the local tracking database.
     local_db: Path = Path("artifacts/mlflow/tracking.db")
-    output: Path | None = None  # Defaults to artifacts/exports/<run_id>.json.
+    output: Path | None = None  # Single-run JSON path, or series directory.
     import_local: bool = True
     max_points: int | None = None  # None keeps complete overall curves.
 
@@ -122,7 +124,7 @@ def normalized_uri(uri):
     return uri.rstrip("/")
 
 
-def export(config: ExportConfig):
+def export_one(config: ExportConfig):
     """Read a single run; optionally import full data, always export a small report."""
     if config.max_points is not None and config.max_points < 4:
         raise ValueError("max_points must be at least 4")
@@ -174,7 +176,7 @@ def export(config: ExportConfig):
         "resume_config": documents.get("resume_config"),
         "environment": {key: provenance[key] for key in (
             "git_commit", "parameters", "input_dim", "num_feature_layers", "device",
-            "torch", "python", "packages", "learning_rate_schedule") if key in provenance},
+            "torch", "python", "packages", "learning_rate_schedule", "schedule_steps") if key in provenance},
         "code_dirty": bool(provenance.get("git_status")), "lineage": lineage,
         "best": {"step": best_step, "sha256": best.get("sha256"),
                  "metrics": {k: v for k, v in best.get("metrics", {}).items() if k.startswith("all/")}},
@@ -195,5 +197,68 @@ def export(config: ExportConfig):
     return {"report": str(output), "local_run_id": local_id}
 
 
+def runs_since(source, run_id):
+    """Read every page in the anchor's experiment, including timestamp ties."""
+    anchor = source.get_run(run_id)
+    runs, token = [], None
+    while True:
+        page = source.search_runs(
+            [anchor.info.experiment_id],
+            filter_string=f"attributes.start_time >= {anchor.info.start_time}",
+            order_by=["attributes.start_time ASC"], max_results=1000,
+            page_token=token,
+        )
+        runs.extend(page)
+        token = page.token
+        if not token:
+            break
+    return sorted(runs, key=lambda run: (run.info.start_time, run.info.run_id))
+
+
+def export(config: ExportConfig):
+    """Export one run or every active run started since an anchor run."""
+    if (config.run_id is None) == (config.since_run_id is None):
+        raise ValueError("Specify exactly one of --run-id and --since-run-id")
+    if config.max_points is not None and config.max_points < 4:
+        raise ValueError("max_points must be at least 4")
+    if config.run_id is not None:
+        return export_one(config)
+    load_tracking_env()
+    from mlflow.tracking import MlflowClient
+
+    source_uri = normalized_uri(config.source_uri or f"sqlite:///{config.local_db.resolve()}")
+    source = MlflowClient(tracking_uri=source_uri)
+    runs = runs_since(source, config.since_run_id)
+    directory = config.output or Path("artifacts/exports") / f"since_{config.since_run_id}"
+    directory.mkdir(parents=True, exist_ok=True)
+    index = {"source_uri": source_uri, "since_run_id": config.since_run_id,
+             "selection": "start_time >= anchor start_time, same experiment, nondeleted runs",
+             "runs": []}
+    for run in tqdm(runs, desc="Exporting MLflow runs", unit="run"):
+        row = {"id": run.info.run_id, "name": run.data.tags.get("mlflow.runName"),
+               "status": run.info.status, "start_time_ms": run.info.start_time}
+        try:
+            # IDs make portable filenames even if names contain Windows-invalid
+            # characters or duplicate another run's name.
+            result = export_one(replace(config, run_id=run.info.run_id, since_run_id=None,
+                                        output=directory / f"{run.info.run_id}.json"))
+            row.update(report=Path(result["report"]).name, local_run_id=result["local_run_id"])
+            report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
+            row["best"] = report["best"]
+        except Exception as error:
+            row["error"] = str(error)
+            tqdm.write(f"Export failed for {run.info.run_id}: {error}")
+        index["runs"].append(row)
+        # Keep a useful index if a later download fails or the user interrupts.
+        write_json(directory / "index.json", index)
+    if not runs:
+        write_json(directory / "index.json", index)
+    return {"index": str(directory / "index.json"), "runs": len(runs),
+            "failed": sum("error" in row for row in index["runs"])}
+
+
 if __name__ == "__main__":
-    print(export(tyro.cli(ExportConfig)))
+    result = export(tyro.cli(ExportConfig))
+    print(result)
+    if result.get("failed"):
+        raise SystemExit(1)

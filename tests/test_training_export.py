@@ -119,3 +119,65 @@ def test_report_only_handles_runs_without_our_artifacts(tmp_path):
     assert report['metrics']['all/accuracy']['last'][1] == .75
     with pytest.raises(ValueError, match='at least 4'):
         export(ExportConfig(run_id=run_id, max_points=1))
+
+
+def test_bulk_export_includes_anchor_ties_newer_and_all_statuses(tmp_path):
+    uri = f"sqlite:///{tmp_path / 'source.db'}"
+    source, experiment = client(uri, 'series')
+    old = source.create_run(experiment, start_time=100).info.run_id
+    anchor = source.create_run(experiment, start_time=200).info.run_id
+    tied = source.create_run(experiment, start_time=200).info.run_id
+    newer = source.create_run(experiment, start_time=300).info.run_id
+    deleted = source.create_run(experiment, start_time=400).info.run_id
+    source.delete_run(deleted)
+    other_experiment = source.create_experiment('unrelated')
+    unrelated = source.create_run(other_experiment, start_time=500).info.run_id
+    source.set_terminated(newer, 'FAILED')
+    for run_id in (anchor, tied, newer):
+        source.log_metric(run_id, 'all/loss', .5)
+    config = ExportConfig(since_run_id=anchor, source_uri=uri,
+                          import_local=False, output=tmp_path / 'reports')
+    result = export(config)
+    index = json.loads((config.output / 'index.json').read_text())
+    ids = [row['id'] for row in index['runs']]
+    assert set(ids) == {anchor, tied, newer}
+    assert not set(ids) & {old, deleted, unrelated}
+    assert ids[-1] == newer
+    assert result['failed'] == 0
+    assert all((config.output / row['report']).exists() for row in index['runs'])
+    assert export(config)['runs'] == 3
+    assert len(list(config.output.glob('*.json'))) == 4
+
+
+def test_run_selection_reads_all_pages():
+    from types import SimpleNamespace
+    from src.training.export import runs_since
+
+    class Page(list):
+        token = None
+
+    def run(identity, started):
+        return SimpleNamespace(info=SimpleNamespace(run_id=identity, start_time=started,
+                                                    experiment_id='experiment'))
+
+    class Source:
+        def get_run(self, identity):
+            return run(identity, 200)
+
+        def search_runs(self, experiment_ids, **kwargs):
+            assert experiment_ids == ['experiment']
+            assert kwargs['filter_string'] == 'attributes.start_time >= 200'
+            if kwargs['page_token'] is None:
+                page = Page([run('a', 200)])
+                page.token = 'next'
+                return page
+            assert kwargs['page_token'] == 'next'
+            return Page([run('b', 300)])
+
+    assert [r.info.run_id for r in runs_since(Source(), 'a')] == ['a', 'b']
+
+
+@pytest.mark.parametrize('kwargs', [{}, {'run_id': 'a', 'since_run_id': 'b'}])
+def test_export_requires_one_selection_mode(kwargs):
+    with pytest.raises(ValueError, match='exactly one'):
+        export(ExportConfig(**kwargs))
