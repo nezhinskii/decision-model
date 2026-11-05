@@ -29,7 +29,7 @@ class NativeLMSource:
             "split_sha256": file_hash(self.path),
             "prompt_version": PROMPT_VERSION,
         }
-        self.provenance = self.signature
+        self.provenance = dict(self.signature)
         self.tags = {"model_family": "native_lm", "mode": str(config.inference.mode)}
         self.artifacts = {"data_summary.json": data_summary(config.dataset)}
 
@@ -44,4 +44,7 @@ class NativeLMSource:
 
     def predict(self, batch):
         example, question = batch
-        return [self.model.predict(example.context, question)]
+        output = self.model.predict(example.context, question)
+        if getattr(self.model, "runtime_info", None) is not None:
+            self.provenance["runtime"] = self.model.runtime_info
+        return [output]

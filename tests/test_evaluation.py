@@ -160,3 +160,17 @@ def test_reporting_does_not_recompute_existing_predictions(example, monkeypatch)
         summary.result()
     summary.result()
     assert len(calls) == len(example.questions)
+
+
+def test_phase_rates_exclude_unprofiled_resumed_rows(example):
+    old = prediction(example.id, example.questions[0], dict(
+        status="ok", scores=[0., 1.], seconds=100., reasoning_tokens=9000))
+    new = prediction(example.id, example.questions[1], dict(
+        status="reasoning_limit", scores=None, seconds=12., reasoning_tokens=100,
+        generation_seconds=10., prefill_seconds=2., decode_seconds=8.,
+        decode_tokens=99, scoring_seconds=0.))
+    metrics = PredictionSummary([old, new]).result()["metrics"]
+    assert metrics["evaluation/reasoning_tokens"] == 9100
+    assert metrics["evaluation/profiled_questions"] == 1
+    assert metrics["evaluation/generation_tokens_per_second"] == 10
+    assert metrics["evaluation/decode_tokens_per_second"] == 99 / 8

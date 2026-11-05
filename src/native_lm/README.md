@@ -41,10 +41,21 @@ use softmax across valid labels at temperature 1. `label_probability_mass` recor
 their combined probability before renormalization; this is constrained-choice
 scoring, not an evaluation of freely generated answer formatting.
 
-Reasoning uses model generation with its native cache. Scoring performs a fresh
-forward over prompt + reasoning and retains vocabulary logits at only the last
-position. This trades one additional forward for simple, reliable handling of
-hybrid recurrent caches. Per-token generation logits are not retained.
+Reasoning returns its native cache to scoring. Only the unprocessed final token
+and answer separator are appended; the complete prompt/reasoning is not replayed.
+Multi-token labels share cached prefixes. At branches both attention KV and
+mutable recurrent state are cloned; depth-first traversal bounds retained copies.
+Per-token generation logits are not retained.
+
+Startup logs report actual 4-bit modules, dtype, attention backend and resolved
+hybrid kernel providers, warning when reference PyTorch kernels remain active.
+The first three predictions and every 25th print generation/prefill/decode/scoring
+times and reused-cache/forward token counts. Phase timings, cache counters and CUDA
+memory peaks are saved with predictions and aggregated in evaluation metrics.
+Decode throughput excludes the first prefill forward; generation throughput includes
+it. Old resumed predictions remain valid but do not enter the new phase rates;
+`evaluation/profiled_questions` identifies their coverage. Use a new run name for
+an entirely fresh speed measurement.
 
 Reasoning text is saved only with `--inference.save-reasoning`; this text then
 becomes part of the prediction artifact uploaded to MLflow. Timing includes

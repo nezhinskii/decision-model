@@ -101,5 +101,12 @@ def run_evaluation(config: EvaluationConfig, *, kind: str, source_factory):
             tracker.artifact(journal.path)
         raise
     finally:
-        sender.close()
+        # Runtime details become available only after lazy model loading.
+        try:
+            provenance_path = root / "provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            write_json(provenance_path, {**provenance, **source.provenance})
+            tracker.artifact(provenance_path)
+        finally:
+            sender.close()
     return report["metrics"]
