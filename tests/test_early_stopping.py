@@ -42,7 +42,7 @@ def test_early_stop_resumes_counter_saves_latest_and_does_not_restart(run_setup,
         calls.append(1)
         return {'all/loss': 1. + .1 * (len(calls) - 1)}
 
-    monkeypatch.setattr(training, 'evaluate', validate)
+    monkeypatch.setattr(training, 'validate', validate)
     root = train(replace(config, max_steps=2))
     paused = torch.load(root / 'latest.pt', weights_only=False)
     assert paused['progress']['early_stopping']['bad_checks'] == 1

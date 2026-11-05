@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from src.backbone.inputs import AttentionMode, InputBuilder, InputConfig, InputTooLongError, build_mask
-from src.backbone.features import PoolingConfig, extract_features
+from src.backbone.pooling import PoolingConfig, extract_features
 from src.backbone.model import BackboneOutput, FrozenBackbone
 from conftest import make_example
 

@@ -9,11 +9,12 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-import src.feature_cache.prepare as preparation
-import src.feature_cache.dataset as reading
-from src.backbone.features import PoolingConfig
+import src.features.prepare as preparation
+import src.features.cache as reading
+from src.backbone.pooling import PoolingConfig
 from src.backbone.inputs import InputConfig
-from src.backbone.model import BackboneConfig, BackboneOutput
+from src.backbone.loading import BackboneConfig
+from src.backbone.model import BackboneOutput
 from src.data.schema import arrow_schema
 from conftest import make_example
 

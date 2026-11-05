@@ -9,13 +9,13 @@ import torch
 from mlflow.tracking import MlflowClient
 
 from src.heads import HeadConfig
-from src.training.objectives import question_metrics
+from src.evaluation.metrics import question_log_probs, question_metrics, cross_entropy
 from src.training.train_head import TrainConfig, train
-from src.training.evaluate import EvaluateConfig, evaluate_checkpoint
-from src.training.tracking import sync
-from src.training import tracking
-from src.feature_cache.prepare import prepare
-from src.feature_cache.dataset import FeatureDataset, collate_features
+from src.evaluation.evaluate_head import HeadEvaluationConfig, evaluate_head as evaluate
+from src.experiments.tracking import sync
+from src.experiments import tracking
+from src.features.prepare import prepare
+from src.features.cache import FeatureDataset, collate_features
 from test_cache import cache_setup
 
 
@@ -26,7 +26,8 @@ def test_grouped_metrics_match_reference_values_and_gradients():
     batch = SimpleNamespace(targets=targets, features=SimpleNamespace(
         option_to_question=links, questions=torch.empty(3, 1, 1)))
     scores = torch.tensor([1000., 1000., -1000., -999., -998., 5.], requires_grad=True)
-    actual = question_metrics(scores, batch)
+    normalized = question_log_probs(scores, links, 3)
+    actual = question_metrics(normalized, targets, links, 3)
     reference = []
     for question in range(3):
         log_probs = scores[links == question].log_softmax(0)
@@ -36,7 +37,7 @@ def test_grouped_metrics_match_reference_values_and_gradients():
             (log_probs.exp() - target).square().sum())))
     reference = torch.stack(reference)
     torch.testing.assert_close(actual, reference)
-    actual_grad = torch.autograd.grad(actual[:, 0].sum(), scores, retain_graph=True)[0]
+    actual_grad = torch.autograd.grad(cross_entropy(normalized, targets, links, 3).sum(), scores, retain_graph=True)[0]
     reference_grad = torch.autograd.grad(reference[:, 0].sum(), scores)[0]
     torch.testing.assert_close(actual_grad, reference_grad)
 
@@ -53,11 +54,14 @@ def test_loss_normalizes_per_question_and_matches_soft_targets(cache_setup):
     root = prepare(config)
     batch = collate_features(list(FeatureDataset(root, 'train')))
     logits = torch.tensor([0., 1., 100., 101., -100., -99.], requires_grad=True)
-    values = question_metrics(logits, batch)
+    links = batch.features.option_to_question
+    questions = len(batch.features.questions)
+    normalized = question_log_probs(logits, links, questions)
+    values = question_metrics(normalized, batch.targets, links, questions)
     torch.testing.assert_close(values[:, 0], values[0, 0].expand(3))
     expected = -(torch.tensor([0.25, 0.75]) * torch.tensor([0., 1.]).log_softmax(0)).sum()
     torch.testing.assert_close(values[:, 0], expected.expand(3))
-    values[:, 0].mean().backward()
+    cross_entropy(normalized, batch.targets, links, questions).mean().backward()
     assert torch.isfinite(logits.grad).all()
 
 
@@ -79,7 +83,8 @@ def test_interrupted_training_matches_uninterrupted_and_sync_is_idempotent(cache
     assert resumed['progress']['step'] == expected['progress']['step'] == 2
     for key, value in expected['model'].items():
         torch.testing.assert_close(resumed['model'][key], value, atol=0, rtol=0)
-    result = evaluate_checkpoint(EvaluateConfig(run=root, cpu=True))
+    result = evaluate(HeadEvaluationConfig(run=root, name="head_eval", cpu=True,
+        output=root.parent, tracking_db=cfg.tracking_db, split="test"))
     assert (root / 'cache_summary.json').exists()
     assert not (root / 'cache_manifest.json').exists()
     summary = json.loads((root / 'cache_summary.json').read_text())

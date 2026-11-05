@@ -7,8 +7,9 @@ from mlflow.entities import Metric
 from mlflow.tracking import MlflowClient
 import pytest
 
-from src.training.export import ExportConfig, compact, curve_summary, export
-from src.training.tracking import client, write_json
+from src.experiments.export import ExportConfig, compact, curve_summary, export
+from src.experiments.tracking import client
+from src.utils.files import write_json
 
 
 def test_curves_are_bounded_preserve_extrema_and_expose_replayed_steps():
@@ -151,7 +152,7 @@ def test_bulk_export_includes_anchor_ties_newer_and_all_statuses(tmp_path):
 
 def test_run_selection_reads_all_pages():
     from types import SimpleNamespace
-    from src.training.export import runs_since
+    from src.experiments.export import runs_since
 
     class Page(list):
         token = None

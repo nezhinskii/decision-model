@@ -1,16 +1,18 @@
-"""Local MLflow is authoritative; remote failures never abort training."""
+"""Local MLflow is authoritative; remote failures preserve local results."""
 
 import json
 from pathlib import Path
 import time
 import warnings
 import threading
+import shutil
 import hashlib
 from tempfile import TemporaryDirectory
 
-import tyro
 from dotenv import load_dotenv
 from tqdm.auto import tqdm
+
+from ..utils.files import file_hash, write_json
 
 REPORT_ARTIFACTS = (
     "config.json",
@@ -20,19 +22,13 @@ REPORT_ARTIFACTS = (
     "data_summary.json",
     "best.json",
     "evaluation.json",
+    "predictions.jsonl",
 )
 
 
 def load_tracking_env():
     """Read repository-local credentials; explicit shell variables take precedence."""
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
-
-
-def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, default=str) + "\n")
-    temporary.replace(path)
 
 
 def client(uri, experiment):
@@ -234,15 +230,17 @@ def sync(run: Path, remote_uri: str):
         # training continues. The acknowledgment must refer to the uploaded bytes.
         with TemporaryDirectory() as temporary:
             for name in files:
-                data = (run / name).read_bytes()
-                checksum = hashlib.sha256(data).hexdigest()
+                path = Path(temporary) / name
+                # Copy in chunks: prediction artifacts can be large. Hash the
+                # completed snapshot so the acknowledgment matches uploaded bytes.
+                with (run / name).open("rb") as source_file, path.open("wb") as snapshot:
+                    shutil.copyfileobj(source_file, snapshot, length=1024 * 1024)
+                checksum = file_hash(path)
                 tag = f"decision_sync.artifact.{name}"
                 if target.data.tags.get(tag) != checksum:
                     bar.set_description(
-                        f"DagsHub sync: uploading {name} ({len(data)} B)"
+                        f"DagsHub sync: uploading {name} ({path.stat().st_size} B)"
                     )
-                    path = Path(temporary) / name
-                    path.write_bytes(data)
                     remote.log_artifact(remote_id, str(path))
                     remote.set_tag(remote_id, tag, checksum)
                 bar.update()
@@ -346,10 +344,7 @@ class BackgroundSync:
                 )
         if self.thread.is_alive():
             warnings.warn(
-                "Remote sync still pending; retry with src.training.tracking. "
+                "Remote sync still pending; retry with python -m src.experiments upload. "
                 "All results are saved locally."
             )
 
-
-if __name__ == "__main__":
-    tyro.cli(sync)

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from src.training import tracking
+from src.experiments import tracking
 
 
 def test_requests_do_not_wait_and_coalesce_into_one_followup(monkeypatch, tmp_path):

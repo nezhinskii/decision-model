@@ -8,7 +8,7 @@ from mlflow.entities import Metric
 from mlflow.tracking import MlflowClient
 import pytest
 
-from src.training import tracking
+from src.experiments import tracking
 
 
 def test_sync_batches_skips_unchanged_data_and_recovers_lost_response(tmp_path, monkeypatch, capsys):

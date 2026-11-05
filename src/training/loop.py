@@ -1,21 +1,29 @@
-"""Shared evaluation and one question-weighted optimizer step."""
+"""Validation during training and one question-weighted optimizer step."""
 
 import torch
 
-from .objectives import MetricTotals, question_metrics, LossConfig, training_values
+from ..evaluation.metrics import MetricTotals, question_log_probs, question_metrics
+from .objectives import LossConfig, training_values
 
 
 @torch.no_grad()
-def evaluate(model, loader, accelerator):
+def validate(model, loader, accelerator):
+    was_training = model.training
     model.eval()
     totals = MetricTotals()
-    for batch in loader:
-        batch = batch.to(accelerator.device)
-        with accelerator.autocast():
-            values = question_metrics(model(batch.features), batch)
-        totals.add(values, batch)
-    model.train()
-    return totals.result()
+    try:
+        for batch in loader:
+            batch = batch.to(accelerator.device)
+            with accelerator.autocast():
+                logits = model(batch.features)
+                log_probs = question_log_probs(logits, batch.features.option_to_question,
+                                               len(batch.features.questions))
+                values = question_metrics(log_probs, batch.targets,
+                                          batch.features.option_to_question, len(batch.features.questions))
+            totals.add(values, batch.categories, batch.target_kinds)
+        return totals.result()
+    finally:
+        model.train(was_training)
 
 
 def train_step(model, batches, optimizer, accelerator, clip_grad, loss_config=None):
@@ -29,9 +37,13 @@ def train_step(model, batches, optimizer, accelerator, clip_grad, loss_config=No
         batch = batch.to(accelerator.device)
         with accelerator.autocast():
             values = training_values(model(batch.features), batch, loss_config)
-            loss = values[:, 3].sum() / questions
+            loss = values.objective.sum() / questions
         accelerator.backward(loss)
-        batch_sums = values.detach().sum(0)
+        # Pack only at the logging boundary, in TRAIN_METRIC_NAMES order.
+        batch_sums = torch.cat((values.metrics.sum(0),
+                               values.objective.detach().sum().reshape(1),
+                               values.ce_component.sum().reshape(1),
+                               values.brier_component.sum().reshape(1)))
         sums = batch_sums if sums is None else sums + batch_sums
     accelerator.unscale_gradients(optimizer)
     torch.nn.utils.clip_grad_norm_(

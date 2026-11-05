@@ -1,22 +1,19 @@
 """Build a fixed research dataset directly from source SFT in one command."""
 
-from collections import Counter
-from dataclasses import asdict, dataclass
-import hashlib
+from contextlib import ExitStack
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import tempfile
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import tyro
-from transformers import AutoTokenizer
-from huggingface_hub import resolve_revision
 
-from ..backbone.inputs import InputBuilder, InputConfig
+from ..utils.files import file_hash
+
 from . import openjev
 from .sampling import select, split_groups
-from .schema import Example, arrow_schema, context_id
+from .source import DatasetSource, filter_candidates, iter_materialized
+from .dataset import DatasetWriter
 
 
 @dataclass
@@ -30,7 +27,8 @@ class PrepareConfig:
     train_size: int = 10_000
     validation_size: int = 1_000
     test_size: int = 1_000
-    batch_size: int = 1024
+    batch_size: int = 1024  # Maximum input rows decoded per batch.
+    context_batch_size: int = 512  # Complete selected contexts held per portion.
     tokenizer_id: str | None = None
     tokenizer_revision: str | None = None
     local_files_only: bool = False
@@ -38,70 +36,14 @@ class PrepareConfig:
     token_reserve: int = 64
 
 
-def file_hash(path: Path) -> str:
-    """Hash file contents for source identity and prepared-file integrity."""
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def summarize(examples: list[Example]) -> dict:
-    """Count questions separately from shared contexts in every manifest section."""
-    categories, tasks, targets, options, per_context = (Counter() for _ in range(5))
-    for example in examples:
-        per_context[len(example.questions)] += 1
-        for question in example.questions:
-            categories[question.category] += 1
-            tasks[question.task] += 1
-            targets[question.target.kind] += 1
-            options[len(question.options)] += 1
-    return {
-        "contexts": len(examples),
-        "questions": sum(categories.values()),
-        "categories": dict(sorted(categories.items())),
-        "tasks": dict(sorted(tasks.items())),
-        "targets": dict(sorted(targets.items())),
-        "option_counts": dict(sorted(options.items())),
-        "questions_per_context": dict(sorted(per_context.items())),
-    }
-
-
-def materialize(
-    source: Path, assignment: dict, config: PrepareConfig
-) -> dict[str, list[Example]]:
-    """Convert only selected rows and merge their questions under shared contexts."""
-    lookup = {
-        candidate.row: name for name, rows in assignment.items() for candidate in rows
-    }
-    grouped = {name: {} for name in assignment}
-    index = 0
-    for batch in pq.ParquetFile(source).iter_batches(batch_size=config.batch_size):
-        for raw in batch.to_pylist():
-            if index in lookup:
-                name = lookup[index]
-                key = context_id(raw["state"])
-                if key not in grouped[name]:
-                    # Store the first selected source text; only the grouping key is normalized.
-                    grouped[name][key] = Example(
-                        id=key, context=raw["state"], questions=[]
-                    )
-                grouped[name][key].questions.append(
-                    openjev.convert(raw, index, config.revision)
-                )
-            index += 1
-    return {
-        name: sorted(groups.values(), key=lambda example: example.id)
-        for name, groups in grouped.items()
-    }
-
-
-def prepare(config: PrepareConfig) -> Path:
+def prepare(config: PrepareConfig, source: DatasetSource | None = None) -> Path:
     """Select, split, convert and publish without a full normalized intermediate copy."""
     sizes = {
         "train": config.train_size,
         "validation": config.validation_size,
         "test": config.test_size,
     }
-    if min(sizes.values()) < 1 or config.batch_size < 1:
+    if min(*sizes.values(), config.batch_size, config.context_batch_size) < 1:
         raise ValueError("Split sizes and batch_size must be positive")
     if (
         not config.name
@@ -117,12 +59,18 @@ def prepare(config: PrepareConfig) -> Path:
         raise ValueError("tokenizer_revision requires tokenizer_id")
     if not 0 <= config.token_reserve < config.max_tokens:
         raise ValueError("Require 0 <= token_reserve < max_tokens")
-    source = openjev.download(config.artifacts / "data" / "raw", config.revision)
-    candidates = openjev.read_index(source, config.batch_size)
+    if source is None:
+        path = openjev.download(config.artifacts / "data" / "raw", config.revision)
+        source = openjev.OpenJevSource(path, config.revision)
+    candidates = source.read_index(config.batch_size)
     source_count = len(candidates)
     builder, length_filter = None, None
     if config.tokenizer_id is not None:
-        from .lengths import filter_candidates
+        # Tokenization is optional; ordinary preparation does not import the
+        # model stack. Reuse the actual serializer when enforcing token budgets.
+        from transformers import AutoTokenizer
+        from huggingface_hub import resolve_revision
+        from ..backbone.inputs import InputBuilder, InputConfig
 
         hub = dict(
             revision=config.tokenizer_revision,
@@ -132,8 +80,10 @@ def prepare(config: PrepareConfig) -> Path:
         )
         if not Path(config.tokenizer_id).is_dir():
             hub["revision"] = resolve_revision(
-                config.tokenizer_id, revision=config.tokenizer_revision,
-                cache_dir=hub["cache_dir"], local_files_only=config.local_files_only,
+                config.tokenizer_id,
+                revision=config.tokenizer_revision,
+                cache_dir=hub["cache_dir"],
+                local_files_only=config.local_files_only,
             ).resolved
         tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_id, **hub)
         # Data selection uses plain text only. Reserve room for later chat
@@ -148,7 +98,6 @@ def prepare(config: PrepareConfig) -> Path:
             source,
             candidates,
             builder,
-            config.revision,
             config.seed,
             config.batch_size,
         )
@@ -165,37 +114,43 @@ def prepare(config: PrepareConfig) -> Path:
         )
     selected, _ = select(candidates, sum(sizes.values()), config.seed)
     assignment, _ = split_groups(selected, sizes, config.seed)
-    examples = materialize(source, assignment, config)
-    if builder is not None:
-        # Verify the final grouped text, not just individual source rows.
-        packed_lengths = [
-            len(builder.encode(record).input_ids)
-            for records in examples.values()
-            for record in records
-        ]
-        length_filter["selected_max_packed_tokens"] = max(packed_lengths)
-    # Group isolation is a scientific invariant, independent of approximate quota matching.
-    seen = set()
-    for split in examples.values():
-        ids = {example.id for example in split}
-        if seen & ids:
-            raise RuntimeError("A context was assigned to more than one split")
-        seen.update(ids)
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=root) as temporary:
         staging = Path(temporary) / "dataset"
         staging.mkdir()
+        # Only the final outputs are staged for atomic publication. There is no
+        # temporary dataset copy or disk-backed grouping store.
+        with ExitStack() as stack:
+            writers = {
+                name: stack.enter_context(
+                    DatasetWriter(
+                        staging / f"{name}.parquet",
+                        batch_size=config.context_batch_size,
+                    )
+                )
+                for name in sizes
+            }
+            maximum_length = 0
+            for name, example in iter_materialized(
+                source, assignment, config.batch_size, config.context_batch_size
+            ):
+                if builder is not None:
+                    # Check each complete context before writing, without a
+                    # second in-memory collection of all selected examples.
+                    maximum_length = max(
+                        maximum_length, len(builder.encode(example).input_ids)
+                    )
+                writers[name].write(example)
+        if length_filter is not None:
+            length_filter["selected_max_packed_tokens"] = maximum_length
         split_manifest = {}
-        for name, records in examples.items():
+        for name, writer in writers.items():
             path = staging / f"{name}.parquet"
-            pq.write_table(
-                pa.Table.from_pylist(
-                    [asdict(record) for record in records], schema=arrow_schema()
-                ),
-                path,
-                compression="zstd",
-            )
-            stats = summarize(records)
+            stats = writer.statistics()
+            if stats["questions"] != len(assignment[name]):
+                raise RuntimeError(
+                    f"Written question count differs from selection for {name}"
+                )
             split_manifest[name] = {
                 "file": path.name,
                 "sha256": file_hash(path),
@@ -208,23 +163,21 @@ def prepare(config: PrepareConfig) -> Path:
             )
         manifest = {
             "seed": config.seed,
-            "source": {
-                "dataset": openjev.DATASET,
-                "revision": config.revision,
-                "stage": "SFT",
-                "file": str(source),
-                "questions": source_count,
-            },
+            "source": {**source.describe(), "questions": source_count},
             "selection": {
                 "category_balance": "equal, capped by source availability; shortages redistributed",
                 "within_category": "proportional by task and target kind in the eligible source pool",
             },
-            "grouping": "SHA256 of context with CRLF normalized and outer newlines removed; no other whitespace changes",
+            "grouping": "Source-provided context IDs; complete groups stay within one split",
+            "preparation": {
+                "source_batch_size": config.batch_size,
+                "context_batch_size": config.context_batch_size,
+                "storage": "streamed_parquet_v1",
+            },
             "splits": split_manifest,
             "length_filter": length_filter,
             "limitations": [
                 "Only selected questions are merged; unselected rows are not added to context groups.",
-                "Source task/template IDs are unavailable; paraphrase and template leakage are not certified absent.",
                 (
                     "Plain input is limited with a token reserve; actual cache inputs may still be skipped if oversized."
                     if builder is not None

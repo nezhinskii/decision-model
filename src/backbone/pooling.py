@@ -7,7 +7,7 @@ import torch
 
 from .inputs import Block, PackedBatch
 from .model import BackboneOutput
-from ..features import FeatureBatch
+from ..features.schema import FeatureBatch
 
 
 class PoolingMode(StrEnum):

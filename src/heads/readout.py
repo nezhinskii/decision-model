@@ -5,7 +5,7 @@ from enum import StrEnum
 import torch
 from torch import nn
 
-from ..features import FeatureBatch
+from ..features.schema import FeatureBatch
 
 
 class ReadoutMode(StrEnum):

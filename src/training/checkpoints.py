@@ -1,32 +1,11 @@
-"""Atomic local model exports and trusted training-state snapshots."""
+"""Trusted training-state snapshots: optimizer, RNG, model and data progress."""
 
-import hashlib
 import os
 from pathlib import Path
 import random
 
 import numpy as np
-from safetensors.torch import load_file, save_file
 import torch
-
-
-def weight_hash(path):
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def save_model(root, model):
-    """Replace best weights only after the temporary file is fully written."""
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "best.safetensors"
-    temporary = path.with_suffix(".tmp")
-    save_file(
-        {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()},
-        temporary,
-    )
-    os.replace(temporary, path)
-    return path
 
 
 def save_latest(path, model, optimizer, accelerator, progress, scheduler=None):
@@ -69,7 +48,3 @@ def load_latest(path, model, optimizer, accelerator, scheduler=None):
     if state["cuda_rng"] is not None:
         torch.cuda.set_rng_state_all(state["cuda_rng"])
     return state["progress"]
-
-
-def load_model(path, model):
-    model.load_state_dict(load_file(str(path)), strict=True)

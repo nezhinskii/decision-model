@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 
 from src.backbone.inputs import InputBuilder, InputConfig
 from src.data import openjev
-from src.data.lengths import filter_candidates
+from src.data.source import filter_candidates
 from src.data.sampling import Candidate, select, split_groups
 from src.data.schema import Example, context_id
 
@@ -40,7 +40,7 @@ def test_length_filter_caps_group_before_sampling(tmp_path, tokenizer):
     pq.write_table(pa.Table.from_pylist(rows), path)
     candidates = openjev.read_index(path, 2)
     builder = InputBuilder(tokenizer, InputConfig(max_packed_tokens=90))
-    eligible, stats = filter_candidates(path, candidates, builder, openjev.REVISION, 42, 2)
+    eligible, stats = filter_candidates(openjev.OpenJevSource(path), candidates, builder, 42, 2)
     assert stats['excluded_individually'] == 1
     assert stats['excluded_group_budget'] > 0
     assert Counter(c.group for c in eligible)[context_id('shared')] < 3
@@ -50,3 +50,35 @@ def test_length_filter_caps_group_before_sampling(tmp_path, tokenizer):
             openjev.convert(rows[c.row], c.row, openjev.REVISION) for c in picked
         ])
         assert len(builder.encode(example).input_ids) <= 90
+
+
+def test_prepare_accepts_non_openjev_source(tmp_path, example):
+    """A different adapter needs no native OpenJev fields or contiguous row IDs."""
+    from dataclasses import replace
+    import json
+    from src.data.prepare import PrepareConfig, prepare
+    from src.data.dataset import read_examples
+
+    records = [Example(f"context-{i}", f"Facts {i}", [replace(
+        example.questions[0], id=f"memory/q{i}", source_row=10 * i + 7)])
+        for i in range(8)]
+
+    class MemorySource:
+        def describe(self):
+            return {"dataset": "memory", "revision": "v1"}
+
+        def read_index(self, batch_size):
+            return [Candidate(e.questions[0].source_row, e.id, "demo", "choice", "soft")
+                    for e in records]
+
+        def read_examples(self, batch_size, rows=None):
+            return (e for e in records if rows is None or e.questions[0].source_row in rows)
+
+    config = PrepareConfig(artifacts=tmp_path, name="memory", train_size=4,
+                           validation_size=2, test_size=2)
+    path = prepare(config, source=MemorySource())
+    manifest = json.loads((path / "manifest.json").read_text())
+    assert manifest["source"] == {"dataset": "memory", "revision": "v1", "questions": 8}
+    questions = [q for split in ("train", "validation", "test")
+                 for e in read_examples(path / f"{split}.parquet") for q in e.questions]
+    assert {q.id for q in questions} == {f"memory/q{i}" for i in range(8)}

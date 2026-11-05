@@ -12,21 +12,23 @@ import numpy as np
 import pytest
 import torch
 
-from src.feature_cache.dataset import collate_features, FeatureDataset
-from src.feature_cache.prepare import prepare
+from src.features.cache import collate_features, FeatureDataset
+from src.features.prepare import prepare
 from src.heads import HeadConfig, build_head
 from src.training import checkpoints
-from src.training.loop import evaluate, train_step
-from src.training.objectives import MetricTotals, question_metrics
-from src.training.provenance import cache_summary, check_cache, data_summary
-from src.training.tracking import write_json
+from src.heads import checkpoints as head_checkpoints
+from src.utils.files import file_hash
+from src.training.loop import validate, train_step
+from src.evaluation.metrics import MetricTotals, question_log_probs, cross_entropy
+from src.experiments.provenance import cache_summary, check_cache, data_summary
+from src.utils.files import write_json
 from src.training.train_head import TrainConfig, train
-from src.training.evaluate import EvaluateConfig, evaluate_checkpoint
+from src.evaluation.evaluate_head import HeadEvaluationConfig, evaluate_head as evaluate
 from test_cache import cache_setup
 from test_training import single_thread_accelerate
 
 training = importlib.import_module('src.training.train_head')
-evaluation = importlib.import_module('src.training.evaluate')
+evaluation = importlib.import_module('src.evaluation.run')
 
 
 @pytest.fixture
@@ -97,8 +99,8 @@ def test_validation_is_batch_size_independent_and_does_not_update_weights(run_se
     head = build_head(4, config.head, 1)
     before = deepcopy(head.state_dict())
     accelerator = Accelerator(cpu=True, mixed_precision='no')
-    small = evaluate(head, [collate_features([r]) for r in records], accelerator)
-    large = evaluate(head, [collate_features(records)], accelerator)
+    small = validate(head, [collate_features([r]) for r in records], accelerator)
+    large = validate(head, [collate_features(records)], accelerator)
     assert small == pytest.approx(large, abs=1e-6)
     assert head.training
     for key, value in head.state_dict().items():
@@ -109,9 +111,9 @@ def test_validation_is_batch_size_independent_and_does_not_update_weights(run_se
 def test_metric_totals_weight_questions_and_group_labels():
     totals = MetricTotals()
     totals.add(torch.tensor([[1., 1., .1], [3., 0., .3]]),
-               SimpleNamespace(categories=['a', 'b'], target_kinds=['hard', 'soft']))
+               ['a', 'b'], ['hard', 'soft'])
     totals.add(torch.tensor([[8., 1., .8]]),
-               SimpleNamespace(categories=['a'], target_kinds=['soft']))
+               ['a'], ['soft'])
     result = totals.result()
     assert result['all/loss'] == 4.
     assert result['all/accuracy'] == pytest.approx(2 / 3)
@@ -157,16 +159,16 @@ def test_checkpoint_replace_and_failed_write_keeps_previous(tmp_path, monkeypatc
 
     def save():
         if kind == 'best':
-            return checkpoints.save_model(tmp_path, model)
+            return head_checkpoints.save_model(tmp_path, model)
         checkpoints.save_latest(path, model, optimizer, accelerator, {'step': 1})
         return path
 
     assert save() == path
-    first_hash = checkpoints.weight_hash(path)
+    first_hash = file_hash(path)
     with torch.no_grad():
         model.weight.add_(1)
     save()
-    assert checkpoints.weight_hash(path) != first_hash
+    assert file_hash(path) != first_hash
     assert list(tmp_path.iterdir()) == [path]
     previous = path.read_bytes()
 
@@ -174,7 +176,7 @@ def test_checkpoint_replace_and_failed_write_keeps_previous(tmp_path, monkeypatc
         raise OSError('simulated disk failure')
 
     if kind == 'best':
-        monkeypatch.setattr(checkpoints, 'save_file', interrupted)
+        monkeypatch.setattr(head_checkpoints, 'save_file', interrupted)
     else:
         monkeypatch.setattr(checkpoints.torch, 'save', interrupted)
     with pytest.raises(OSError, match='disk failure'):
@@ -187,11 +189,12 @@ def test_each_head_can_train_and_evaluate_from_cache(run_setup, processor):
     config, runs = run_setup
     head = replace(config.head, processor=processor, attention_heads=1, num_slots=2)
     root = train(replace(config, head=head))
-    result = evaluate_checkpoint(EvaluateConfig(run=root, cpu=True))
+    result = evaluate(HeadEvaluationConfig(run=root, name="head_eval", cpu=True,
+            output=root.parent, tracking_db=config.tracking_db, split="test"))
     assert np.isfinite(result['all/loss'])
     assert list((root / 'checkpoints').glob('*.safetensors')) == [root / 'checkpoints/best.safetensors']
     assert runs[str(root)]['statuses'][-1] == 'FINISHED'
-    report = next((root / 'evaluations').glob('*/evaluation.json'))
+    report = root.parent / 'head_eval/evaluation.json'
     assert json.loads(report.read_text())['source_train_run_id'] == str(root)
 
 
@@ -219,7 +222,11 @@ def test_interruption_keeps_safe_checkpoint_and_sets_status(run_setup, monkeypat
         if calls == 2:
             # Interrupt after consuming dropout RNG and accumulating gradients.
             model, batches = args[:2]
-            question_metrics(model(batches[0].features), batches[0])[:, 0].mean().backward()
+            batch = batches[0]
+            links = batch.features.option_to_question
+            questions = len(batch.features.questions)
+            log_probs = question_log_probs(model(batch.features), links, questions)
+            cross_entropy(log_probs, batch.targets, links, questions).mean().backward()
             raise error
         return original(*args, **kwargs)
 
@@ -242,11 +249,11 @@ def test_logging_intervals_partial_flush_and_best_selection(run_setup, monkeypat
     config, runs = run_setup
     # Three steps: validation after each, with an improvement then regression.
     losses = iter([3., 2., 4., 5.])
-    monkeypatch.setattr(training, 'evaluate', lambda *args: {'all/loss': next(losses)})
+    monkeypatch.setattr(training, 'validate', lambda *args: {'all/loss': next(losses)})
     root = train(replace(config, log_every=2, validate_every=1))
     best = json.loads((root / 'best.json').read_text())
     assert best['step'] == 2 and best['metrics']['all/loss'] == 2.
-    assert checkpoints.weight_hash(root / best['weights']) == best['sha256']
+    assert file_hash(root / best['weights']) == best['sha256']
     assert len(list((root / 'checkpoints').iterdir())) == 1
     steps = [step for step, metrics in runs[str(root)]['logs'] if 'train/all/loss' in metrics]
     assert steps == [1, 2, 3]  # Validation flushes even short intervals.
@@ -283,13 +290,15 @@ def test_resume_guards_and_evaluation_reject_changed_files(run_setup):
         train(config)
     assert runs[str(root)]['statuses'][-1] == 'FINISHED'
     with pytest.raises(ValueError, match='Cache manifest changed'):
-        evaluate_checkpoint(EvaluateConfig(run=root, cpu=True))
+        evaluate(HeadEvaluationConfig(run=root, name="head_eval", cpu=True,
+            output=root.parent, tracking_db=config.tracking_db, split="test"))
     manifest_path.write_text(original)
     best = json.loads((root / 'best.json').read_text())
     with (root / best['weights']).open('ab') as stream:
         stream.write(b'corrupted')
     with pytest.raises(ValueError, match='checksum mismatch'):
-        evaluate_checkpoint(EvaluateConfig(run=root, cpu=True))
+        evaluate(HeadEvaluationConfig(run=root, name="head_eval", cpu=True,
+            output=root.parent, tracking_db=config.tracking_db, split="test"))
 
 
 def test_nonempty_run_without_checkpoint_is_not_overwritten(run_setup):
@@ -320,18 +329,18 @@ def test_old_best_filename_is_removed_after_improvement(run_setup, monkeypatch):
     original.rename(legacy)
     best['weights'] = str(legacy.relative_to(root))
     write_json(root / 'best.json', best)
-    monkeypatch.setattr(training, 'evaluate', lambda *args: {'all/loss': -1.})
+    monkeypatch.setattr(training, 'validate', lambda *args: {'all/loss': -1.})
     train(replace(config, epochs=2))
     assert not legacy.exists()
     best = json.loads((root / 'best.json').read_text())
     assert best['weights'] == 'checkpoints/best.safetensors'
-    assert checkpoints.weight_hash(root / best['weights']) == best['sha256']
+    assert file_hash(root / best['weights']) == best['sha256']
 
 
 def test_weight_loading_rejects_incompatible_architecture(tmp_path):
-    path = checkpoints.save_model(tmp_path, torch.nn.Linear(2, 1))
+    path = head_checkpoints.save_model(tmp_path, torch.nn.Linear(2, 1))
     with pytest.raises(RuntimeError, match='size mismatch'):
-        checkpoints.load_model(path, torch.nn.Linear(3, 1))
+        head_checkpoints.load_model(path, torch.nn.Linear(3, 1))
 
 
 def test_nonfinite_gradient_does_not_update_parameters(run_setup):
@@ -374,11 +383,13 @@ def test_evaluation_failure_marks_its_own_run_failed(run_setup, monkeypatch):
     def fail(*args):
         raise RuntimeError('evaluation failed')
 
-    monkeypatch.setattr(evaluation, 'evaluate', fail)
+    from src.evaluation.cached_head import CachedHeadSource
+    monkeypatch.setattr(CachedHeadSource, 'predict', fail)
     with pytest.raises(RuntimeError, match='evaluation failed'):
-        evaluate_checkpoint(EvaluateConfig(run=root, cpu=True))
+        evaluate(HeadEvaluationConfig(run=root, name="head_eval", cpu=True,
+            output=root.parent, tracking_db=config.tracking_db, split="test"))
     assert runs[str(root)]['statuses'][-1] == 'FINISHED'
-    evaluation_runs = [state for path, state in runs.items() if '/evaluations/' in path]
+    evaluation_runs = [state for path, state in runs.items() if path.endswith('/head_eval')]
     assert len(evaluation_runs) == 1
     assert evaluation_runs[0]['statuses'][-1] == 'FAILED'
 
@@ -387,14 +398,14 @@ def test_provenance_keeps_identity_and_counts_but_omits_inventories(tmp_path):
     manifest = {'features': {'layers': [2]}, 'source_files': {'train': {'sha256': 'abc'}},
                 'splits': {'train': {'contexts': 4, 'questions': 7, 'parts': ['large inventory']}}}
     write_json(tmp_path / 'cache_summary.json', cache_summary(tmp_path, manifest))
-    check_cache(tmp_path, tmp_path, manifest)
+    check_cache(tmp_path, manifest)
     assert 'parts' not in cache_summary(tmp_path, manifest)['splits']['train']
     # Old full-manifest runs remain readable.
     (tmp_path / 'cache_summary.json').unlink()
     write_json(tmp_path / 'cache_manifest.json', manifest)
-    check_cache(tmp_path, tmp_path, manifest)
+    check_cache(tmp_path, manifest)
     with pytest.raises(ValueError, match='changed'):
-        check_cache(tmp_path, tmp_path, {**manifest, 'features': {'layers': [1]}})
+        check_cache(tmp_path, {**manifest, 'features': {'layers': [1]}})
     source = {'source': {'dataset': 'demo', 'revision': 'fixed'}, 'seed': 3,
               'length_filter': {'max_tokens': 2048, 'by_category': {'large': []}},
               'splits': {'train': {'sha256': 'abc', 'statistics': {
@@ -406,3 +417,13 @@ def test_provenance_keeps_identity_and_counts_but_omits_inventories(tmp_path):
     assert summary['splits']['train']['categories'] == {'a': 7}
     assert 'by_category' not in summary['length_filter']
     assert 'questions_per_context' not in summary['splits']['train']
+
+
+def test_validation_restores_eval_mode_on_failure():
+    model = torch.nn.Linear(2, 1).eval()
+    class BrokenLoader:
+        def __iter__(self):
+            raise RuntimeError("broken validation data")
+    with pytest.raises(RuntimeError, match="broken validation"):
+        validate(model, BrokenLoader(), None)
+    assert not model.training

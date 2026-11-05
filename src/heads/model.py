@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from torch import nn
 
-from ..features import FeatureBatch
+from ..features.schema import FeatureBatch
 from .projection import InputProjection
 from .processors import IdentityProcessor, JointProcessor, SeparateMLPProcessor
 from .scorers import PointerScorer
@@ -36,6 +36,11 @@ class HeadConfig:
     layer_indices: tuple[int, ...] = ()  # Empty means all R cached layers, in order.
     router_dim: int = 128
     norm_type: NormType = NormType.layernorm
+
+    @property
+    def requires_context(self) -> bool:
+        """Whether input loading must include context-token features."""
+        return self.processor == ProcessorType.joint and self.use_cross_attention
 
 
 class DecisionHead(nn.Module):

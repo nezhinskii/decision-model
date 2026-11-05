@@ -48,18 +48,22 @@ policy, storage format and manifest contents.
 
 The feature extraction command writes pooled backbone outputs and targets in
 shards for head training without loading the backbone again. See
-[src/feature_cache/README.md](src/feature_cache/README.md) for checkpoint settings, commands
+[src/features/README.md](src/features/README.md) for checkpoint settings, commands
 and a cache-loading example.
 
 ## Repository layout
 
 ```text
 src/
-  features.py            # shared feature tensors and links consumed by heads
   data/                  # common schema, source adapter, sampling and preparation
   backbone/              # packed inputs, lazy frozen loading and feature pooling
-  feature_cache/         # feature cache preparation and training-batch loading
-  heads/                 # shared projections, processors and Pointer scoring
+  features/              # feature schemas, cache storage/loading and preparation
+  heads/                 # projections, processors, Pointer scoring and weight exports
+  native_lm/             # pretrained LM-head inference and answer prompts
+  evaluation/            # head/LM evaluation commands and shared metrics
+  experiments/           # shared MLflow tracking, export and provenance
+  training/              # head optimization, validation and resume
+  utils/files.py         # shared atomic JSON and streaming checksums
 notebooks/
   backbone.ipynb          # offline mask/shape checks; optional pretrained usage
 docs/                    # research plans and technical agreements
@@ -68,8 +72,9 @@ uv.lock
 ```
 
 See [the head guide](src/heads/README.md) for processors, ablations and cache usage.
-Training, resume, evaluation and local/remote MLflow commands are described in
-[the training guide](src/training/README.md).
+Training and resume are described in [the training guide](src/training/README.md).
+The [evaluation guide](src/evaluation/README.md) covers both cached heads and native
+LMs; [experiments](src/experiments/README.md) covers shared MLflow sync and exports.
 See [the backbone guide](src/backbone/README.md) for input conventions and lazy
 loading. The notebook runs without downloads by default; pretrained loading is
 explicitly opt-in, and the main research checkpoint has not been selected yet.
@@ -88,3 +93,6 @@ artifacts/
   backups/<snapshot_id>/      # tracking backup snapshots
   notebooks/                 # local executed notebooks and exploration outputs
 ```
+
+Native LM prompting and direct/thinking inference are described in
+[the native LM guide](src/native_lm/README.md).

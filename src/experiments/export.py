@@ -7,10 +7,10 @@ import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import tyro
 from tqdm.auto import tqdm
 
-from .tracking import REPORT_ARTIFACTS, client, load_tracking_env, write_json
+from .tracking import REPORT_ARTIFACTS, client, load_tracking_env
+from ..utils.files import write_json
 
 
 @dataclass
@@ -42,8 +42,12 @@ def curve_summary(history, limit):
         limit = len(points)
     selected = {0, len(points) - 1}
     if finite:
-        selected.update((min(finite, key=lambda i: points[i].value),
-                         max(finite, key=lambda i: points[i].value)))
+        selected.update(
+            (
+                min(finite, key=lambda i: points[i].value),
+                max(finite, key=lambda i: points[i].value),
+            )
+        )
     if len(points) <= limit:
         selected.update(range(len(points)))
     else:
@@ -53,14 +57,27 @@ def curve_summary(history, limit):
                 break
             selected.add(round(i * (len(points) - 1) / (limit - 1)))
     return {
-        "logged_points": len(history), "unique_steps": len(points),
+        "logged_points": len(history),
+        "unique_steps": len(points),
         "nonfinite_points": sum(not math.isfinite(m.value) for m in history),
         "first": [points[0].step, points[0].value],
         "last": [points[-1].step, points[-1].value],
-        "min": ([points[min(finite, key=lambda i: points[i].value)].step,
-                 min(points[i].value for i in finite)] if finite else None),
-        "max": ([points[max(finite, key=lambda i: points[i].value)].step,
-                 max(points[i].value for i in finite)] if finite else None),
+        "min": (
+            [
+                points[min(finite, key=lambda i: points[i].value)].step,
+                min(points[i].value for i in finite),
+            ]
+            if finite
+            else None
+        ),
+        "max": (
+            [
+                points[max(finite, key=lambda i: points[i].value)].step,
+                max(points[i].value for i in finite),
+            ]
+            if finite
+            else None
+        ),
         "curve": [[points[i].step, points[i].value] for i in sorted(selected)],
     }
 
@@ -74,29 +91,42 @@ def import_run(source, run, histories, artifacts, local_uri, source_uri):
     experiment = source.get_experiment(run.info.experiment_id).name
     local, experiment_id = client(local_uri, experiment)
     identity = hashlib.sha256(f"{source_uri}\n{run.info.run_id}".encode()).hexdigest()
-    matches = local.search_runs([experiment_id],
-                               filter_string=f"tags.import_identity = '{identity}'")
-    target = matches[0] if matches else local.create_run(
-        experiment_id, start_time=run.info.start_time,
-        tags={"import_identity": identity},
+    matches = local.search_runs(
+        [experiment_id], filter_string=f"tags.import_identity = '{identity}'"
+    )
+    target = (
+        matches[0]
+        if matches
+        else local.create_run(
+            experiment_id,
+            start_time=run.info.start_time,
+            tags={"import_identity": identity},
+        )
     )
     target_id = target.info.run_id
     for key, value in run.data.tags.items():
         # Parent IDs and filesystem paths belong to the source machine/store.
         if key not in ("mlflow.parentRunId", "local_directory"):
             local.set_tag(target_id, key, value)
-    for key, value in {"import_identity": identity, "import_source_uri": source_uri,
-                       "import_source_run_id": run.info.run_id,
-                       "imported_view_only": "true"}.items():
+    for key, value in {
+        "import_identity": identity,
+        "import_source_uri": source_uri,
+        "import_source_run_id": run.info.run_id,
+        "imported_view_only": "true",
+    }.items():
         local.set_tag(target_id, key, value)
     for key, value in run.data.params.items():
         local.log_param(target_id, key, value)
     for key, history in histories.items():
-        known = {(m.step, m.timestamp, repr(m.value))
-                 for m in local.get_metric_history(target_id, key)}
-        missing = [m for m in history if (m.step, m.timestamp, repr(m.value)) not in known]
+        known = {
+            (m.step, m.timestamp, repr(m.value))
+            for m in local.get_metric_history(target_id, key)
+        }
+        missing = [
+            m for m in history if (m.step, m.timestamp, repr(m.value)) not in known
+        ]
         for start in range(0, len(missing), 500):
-            local.log_batch(target_id, metrics=missing[start:start + 500])
+            local.log_batch(target_id, metrics=missing[start : start + 500])
     for path in artifacts.values():
         local.log_artifact(target_id, str(path))
     if run.info.status in ("RUNNING", "SCHEDULED"):
@@ -135,19 +165,33 @@ def export_one(config: ExportConfig):
     source_uri = normalized_uri(config.source_uri or local_uri)
     source = MlflowClient(tracking_uri=source_uri)
     run = source.get_run(config.run_id)
-    histories = {key: source.get_metric_history(config.run_id, key)
-                 for key in sorted(run.data.metrics)}
+    histories = {
+        key: source.get_metric_history(config.run_id, key)
+        for key in sorted(run.data.metrics)
+    }
     output = config.output or Path("artifacts/exports") / f"{config.run_id}.json"
     with TemporaryDirectory() as temporary:
-        listed = {item.path for item in source.list_artifacts(config.run_id) if not item.is_dir}
-        artifacts = {name: Path(source.download_artifacts(config.run_id, name, temporary))
-                     for name in REPORT_ARTIFACTS if name in listed}
-        documents = {Path(name).stem: json.loads(path.read_text(encoding="utf-8"))
-                     for name, path in artifacts.items()}
+        listed = {
+            item.path
+            for item in source.list_artifacts(config.run_id)
+            if not item.is_dir
+        }
+        artifacts = {
+            name: Path(source.download_artifacts(config.run_id, name, temporary))
+            for name in REPORT_ARTIFACTS
+            if name in listed
+        }
+        documents = {
+            Path(name).stem: json.loads(path.read_text(encoding="utf-8"))
+            for name, path in artifacts.items()
+            if path.suffix == ".json"
+        }
         local_id = None
         if config.import_local and source_uri != local_uri:
             config.local_db.parent.mkdir(parents=True, exist_ok=True)
-            local_id = import_run(source, run, histories, artifacts, local_uri, source_uri)
+            local_id = import_run(
+                source, run, histories, artifacts, local_uri, source_uri
+            )
 
     best_step = documents.get("best", {}).get("step")
     overall, breakdowns = {}, {}
@@ -163,36 +207,75 @@ def export_one(config: ExportConfig):
             overall[key] = curve_summary(history, config.max_points)
     # Keep essential provenance and avoid repeating metrics/config in artifacts.
     provenance = documents.get("provenance", {})
-    lineage = {name: documents[name] for name in ("data_summary", "cache_summary")
-               if name in documents}
+    lineage = {
+        name: documents[name]
+        for name in ("data_summary", "cache_summary")
+        if name in documents
+    }
     best = documents.get("best", {})
     report = {
-        "run": {"id": run.info.run_id, "name": run.data.tags.get("mlflow.runName"),
-                "status": run.info.status, "source_uri": source_uri,
-                "local_copy_id": local_id, "start_time_ms": run.info.start_time,
-                "end_time_ms": run.info.end_time,
-                "source_train_run_id": run.data.tags.get("source_train_run_id")},
+        "run": {
+            "id": run.info.run_id,
+            "name": run.data.tags.get("mlflow.runName"),
+            "status": run.info.status,
+            "source_uri": source_uri,
+            "local_copy_id": local_id,
+            "start_time_ms": run.info.start_time,
+            "end_time_ms": run.info.end_time,
+            "source_train_run_id": run.data.tags.get("source_train_run_id"),
+        },
         "config": documents.get("config", run.data.params),
         "resume_config": documents.get("resume_config"),
-        "environment": {key: provenance[key] for key in (
-            "git_commit", "parameters", "input_dim", "num_feature_layers", "device",
-            "torch", "python", "packages", "learning_rate_schedule", "schedule_steps") if key in provenance},
-        "code_dirty": bool(provenance.get("git_status")), "lineage": lineage,
-        "best": {"step": best_step, "sha256": best.get("sha256"),
-                 "metrics": {k: v for k, v in best.get("metrics", {}).items() if k.startswith("all/")}},
-        "metrics": overall, "breakdowns": breakdowns,
-        "notes": {"curve_columns": ["step", "value"], "max_curve_points": config.max_points,
-                  "replayed_steps": "latest timestamp wins in report; MLflow keeps full history",
-                  "scope": "one run only; linked test evaluations are separate runs",
-                  "missing_artifacts": [name for name in REPORT_ARTIFACTS if name not in artifacts]},
+        "environment": {
+            key: provenance[key]
+            for key in (
+                "git_commit",
+                "parameters",
+                "input_dim",
+                "num_feature_layers",
+                "device",
+                "torch",
+                "python",
+                "packages",
+                "learning_rate_schedule",
+                "schedule_steps",
+            )
+            if key in provenance
+        },
+        "code_dirty": bool(provenance.get("git_status")),
+        "lineage": lineage,
+        "best": {
+            "step": best_step,
+            "sha256": best.get("sha256"),
+            "metrics": {
+                k: v for k, v in best.get("metrics", {}).items() if k.startswith("all/")
+            },
+        },
+        "metrics": overall,
+        "breakdowns": breakdowns,
+        "notes": {
+            "curve_columns": ["step", "value"],
+            "max_curve_points": config.max_points,
+            "replayed_steps": "latest timestamp wins in report; MLflow keeps full history",
+            "scope": "one run only; linked test evaluations are separate runs",
+            "missing_artifacts": [
+                name for name in REPORT_ARTIFACTS if name not in artifacts
+            ],
+        },
     }
-    # Evaluation runs have metrics but usually no config/provenance artifacts.
+    # Include evaluation-specific source metadata without repeating its metrics.
     if "evaluation" in documents:
-        report["evaluation"] = {k: v for k, v in documents["evaluation"].items() if k != "metrics"}
+        report["evaluation"] = {
+            k: v for k, v in documents["evaluation"].items() if k != "metrics"
+        }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp")
-    temporary.write_text(json.dumps(compact(report), ensure_ascii=False,
-                                    separators=(",", ":"), allow_nan=False), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(
+            compact(report), ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ),
+        encoding="utf-8",
+    )
     temporary.replace(output)
     return {"report": str(output), "local_run_id": local_id}
 
@@ -205,7 +288,8 @@ def runs_since(source, run_id):
         page = source.search_runs(
             [anchor.info.experiment_id],
             filter_string=f"attributes.start_time >= {anchor.info.start_time}",
-            order_by=["attributes.start_time ASC"], max_results=1000,
+            order_by=["attributes.start_time ASC"],
+            max_results=1000,
             page_token=token,
         )
         runs.extend(page)
@@ -226,23 +310,42 @@ def export(config: ExportConfig):
     load_tracking_env()
     from mlflow.tracking import MlflowClient
 
-    source_uri = normalized_uri(config.source_uri or f"sqlite:///{config.local_db.resolve()}")
+    source_uri = normalized_uri(
+        config.source_uri or f"sqlite:///{config.local_db.resolve()}"
+    )
     source = MlflowClient(tracking_uri=source_uri)
     runs = runs_since(source, config.since_run_id)
-    directory = config.output or Path("artifacts/exports") / f"since_{config.since_run_id}"
+    directory = (
+        config.output or Path("artifacts/exports") / f"since_{config.since_run_id}"
+    )
     directory.mkdir(parents=True, exist_ok=True)
-    index = {"source_uri": source_uri, "since_run_id": config.since_run_id,
-             "selection": "start_time >= anchor start_time, same experiment, nondeleted runs",
-             "runs": []}
+    index = {
+        "source_uri": source_uri,
+        "since_run_id": config.since_run_id,
+        "selection": "start_time >= anchor start_time, same experiment, nondeleted runs",
+        "runs": [],
+    }
     for run in tqdm(runs, desc="Exporting MLflow runs", unit="run"):
-        row = {"id": run.info.run_id, "name": run.data.tags.get("mlflow.runName"),
-               "status": run.info.status, "start_time_ms": run.info.start_time}
+        row = {
+            "id": run.info.run_id,
+            "name": run.data.tags.get("mlflow.runName"),
+            "status": run.info.status,
+            "start_time_ms": run.info.start_time,
+        }
         try:
             # IDs make portable filenames even if names contain Windows-invalid
             # characters or duplicate another run's name.
-            result = export_one(replace(config, run_id=run.info.run_id, since_run_id=None,
-                                        output=directory / f"{run.info.run_id}.json"))
-            row.update(report=Path(result["report"]).name, local_run_id=result["local_run_id"])
+            result = export_one(
+                replace(
+                    config,
+                    run_id=run.info.run_id,
+                    since_run_id=None,
+                    output=directory / f"{run.info.run_id}.json",
+                )
+            )
+            row.update(
+                report=Path(result["report"]).name, local_run_id=result["local_run_id"]
+            )
             report = json.loads(Path(result["report"]).read_text(encoding="utf-8"))
             row["best"] = report["best"]
         except Exception as error:
@@ -253,12 +356,8 @@ def export(config: ExportConfig):
         write_json(directory / "index.json", index)
     if not runs:
         write_json(directory / "index.json", index)
-    return {"index": str(directory / "index.json"), "runs": len(runs),
-            "failed": sum("error" in row for row in index["runs"])}
-
-
-if __name__ == "__main__":
-    result = export(tyro.cli(ExportConfig))
-    print(result)
-    if result.get("failed"):
-        raise SystemExit(1)
+    return {
+        "index": str(directory / "index.json"),
+        "runs": len(runs),
+        "failed": sum("error" in row for row in index["runs"]),
+    }

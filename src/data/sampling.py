@@ -7,7 +7,7 @@ import random
 
 @dataclass(frozen=True)
 class Candidate:
-    """Small source-row index used before converting selected records."""
+    """Small source-question index; row is a stable address within the source."""
 
     row: int
     group: str
@@ -25,12 +25,14 @@ def proportional_quotas(total: int, capacities: dict) -> dict:
     """Round proportional counts to integers using largest remainders."""
     available = sum(capacities.values())
     if total < 0 or total > available:
-        raise ValueError(f"Requested {total} questions, but only {available} are available")
+        raise ValueError(
+            f"Requested {total} questions, but only {available} are available"
+        )
     if available == 0:
         return {key: 0 for key in capacities}
     quotas = {key: total * count // available for key, count in capacities.items()}
     order = sorted(capacities, key=lambda k: (-(total * capacities[k] % available), k))
-    for key in order[:total - sum(quotas.values())]:
+    for key in order[: total - sum(quotas.values())]:
         quotas[key] += 1
     return quotas
 
@@ -51,7 +53,9 @@ def balanced_quotas(total: int, capacities: dict[str, int]) -> dict[str, int]:
     return quotas
 
 
-def select(candidates: list[Candidate], total: int, seed: int) -> tuple[list[Candidate], dict]:
+def select(
+    candidates: list[Candidate], total: int, seed: int
+) -> tuple[list[Candidate], dict]:
     """Select by category, then proportionally by task and target kind."""
     pools = defaultdict(list)
     capacities = Counter()
@@ -70,7 +74,9 @@ def select(candidates: list[Candidate], total: int, seed: int) -> tuple[list[Can
     return sorted(selected, key=lambda c: c.row), categories
 
 
-def split_groups(selected: list[Candidate], sizes: dict[str, int], seed: int) -> tuple[dict, dict]:
+def split_groups(
+    selected: list[Candidate], sizes: dict[str, int], seed: int
+) -> tuple[dict, dict]:
     """Assign whole context groups; quotas are soft, isolation is strict."""
     remaining = Counter(candidate.stratum for candidate in selected)
     targets = {}
@@ -93,12 +99,16 @@ def split_groups(selected: list[Candidate], sizes: dict[str, int], seed: int) ->
     used = {name: Counter() for name in sizes}
     for group in ordered:
         counts = Counter(candidate.stratum for candidate in group)
-        fits = [name for name in names if len(assigned[name]) + len(group) <= sizes[name]]
+        fits = [
+            name for name in names if len(assigned[name]) + len(group) <= sizes[name]
+        ]
         choices = fits or names
 
         def score(name: str) -> tuple[float, float]:
-            matched = sum(min(count, max(0, targets[name].get(key, 0) - used[name][key]))
-                          for key, count in counts.items())
+            matched = sum(
+                min(count, max(0, targets[name].get(key, 0) - used[name][key]))
+                for key, count in counts.items()
+            )
             space = sizes[name] - len(assigned[name])
             return matched / len(group), space / max(1, sizes[name])
 

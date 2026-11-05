@@ -1,16 +1,18 @@
-# Frozen feature caches
+# Features and frozen caches
 
 - `prepare.py`: extract pooled question/option features from all prepared splits,
   transfer them to CPU and write bounded shards. Model loading is lazy until run.
-- `dataset.py`: read shards without Transformers or a backbone instance and collate
-  whole contexts into flat training batches with rebased indices.
+- `schema.py`: `FeatureBatch` tensor inputs and `LabeledFeatureBatch` with targets
+  and evaluation metadata. Importing schemas never loads a model or reads files.
+- `cache.py`: CPU-only record serialization, shard reading, collation and loaders.
+  Whole contexts are collated into flat batches with rebased indices.
 
 ## Prepare
 
 Choose a checkpoint and pass its commit SHA for reproducible extraction:
 
 ```bash
-uv run python -m src.feature_cache.prepare \
+uv run python -m src.features.prepare \
   --name baseline_v1 \
   --backbone.model-id ORGANIZATION/CHECKPOINT \
   --backbone.revision COMMIT_SHA \
@@ -90,7 +92,7 @@ Use only one preparation process per named cache at a time.
 ```python
 from pathlib import Path
 from torch.utils.data import DataLoader
-from src.feature_cache.dataset import FeatureDataset, collate_features
+from src.features.cache import FeatureDataset, collate_features
 
 dataset = FeatureDataset(
     Path("artifacts/features/baseline_v1"), "train", shuffle=True, seed=42,
@@ -102,7 +104,7 @@ for epoch in range(10):
     dataset.set_epoch(epoch)
     for batch in loader:
         batch = batch.to("cuda:0")
-        features = batch.features  # Shared src.features.FeatureBatch, same as extraction.
+        features = batch.features  # Shared src.features.schema.FeatureBatch, same as extraction.
         # features.questions: [Q, R, D]; features.options: [V, R, D]
         # features.option_to_question: [V]; batch.targets: [V]
         # A head must normalize scores separately within each question.
@@ -124,7 +126,7 @@ mask, if required by the head, are not added by this collator.
 The reader defaults to `include_context=False`, dropping context features before
 batching. This avoids unnecessary GPU transfer; `.pt` still reads the shared
 shard from disk. Requesting context memory from a cache without it raises an error.
-`TrainingBatch` wraps the shared `FeatureBatch` with targets and evaluation labels;
+`LabeledFeatureBatch` wraps the shared `FeatureBatch` with targets and evaluation labels;
 heads consume only `batch.features`. Dimensions and dtype are available directly
 from feature tensors, and layer numbers remain in `features.metadata`.
 

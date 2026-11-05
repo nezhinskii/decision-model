@@ -1,1 +1,1 @@
-"""Cache-only head training, checkpointing, evaluation and experiment tracking."""
+"""Cache-only head optimization, validation and resumable training state."""

@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.training.objectives import LossConfig, question_metrics, training_values
+from src.training.objectives import LossConfig, training_values
+from src.evaluation.metrics import question_log_probs, question_metrics
 from src.training.train_head import train
 from test_cache import cache_setup
 from test_training import single_thread_accelerate
@@ -16,23 +17,29 @@ from test_training_state import run_setup
                                             ((1., .5), {'ce', 'brier'})])
 def test_disabled_loss_branch_is_not_visited_in_backward(monkeypatch, weights, expected):
     import src.training.objectives as objectives
-    original = objectives._question_statistics
-    visited = set()
+    visited, graphs = set(), set()
 
-    def instrument(*args):
-        metrics, log_probs, ce, brier = original(*args)
-        ce.register_hook(lambda gradient: visited.add('ce'))
-        brier.register_hook(lambda gradient: visited.add('brier'))
-        return metrics, log_probs, ce, brier
+    def instrument(function, name):
+        def wrapped(*args):
+            result = function(*args)
+            if result.requires_grad:
+                graphs.add(name)
+                result.register_hook(lambda gradient: visited.add(name))
+            return result
+        return wrapped
 
-    monkeypatch.setattr(objectives, '_question_statistics', instrument)
+    monkeypatch.setattr(objectives, 'cross_entropy', instrument(objectives.cross_entropy, 'ce'))
+    monkeypatch.setattr(objectives, 'brier_score', instrument(objectives.brier_score, 'brier'))
     batch = SimpleNamespace(targets=torch.tensor([1., 0.]),
                             features=SimpleNamespace(option_to_question=torch.tensor([0, 0]),
                                                      questions=torch.empty(1, 1, 1)))
     logits = torch.tensor([.1, .2], requires_grad=True)
     values = training_values(logits, batch, LossConfig(*weights))
-    values[:, 3].sum().backward()
-    assert visited == expected
+    values.objective.sum().backward()
+    assert visited == graphs == expected
+    assert not values.metrics.requires_grad
+    assert not values.ce_component.requires_grad
+    assert not values.brier_component.requires_grad
 
 
 @pytest.mark.parametrize('weights', [(1., 0.), (0., 1.), (1., .5)])
@@ -58,10 +65,10 @@ def test_objective_values_gradients_and_original_metrics(weights, scope, epsilon
         brier = (log_probs.exp() - (smoothed if scope == 'both' else original)).square().sum()
         references.append(torch.stack((weights[0] * ce + weights[1] * brier, ce, brier)))
     reference = torch.stack(references)
-    torch.testing.assert_close(actual[:, 3:], reference)
-    torch.testing.assert_close(actual[:, :3], question_metrics(logits, batch))
+    torch.testing.assert_close(torch.stack((actual.objective, actual.ce_component, actual.brier_component), dim=-1), reference)
+    torch.testing.assert_close(actual.metrics, question_metrics(question_log_probs(logits, links, 3), targets, links, 3))
     torch.testing.assert_close(targets, before, atol=0, rtol=0)
-    a = torch.autograd.grad(actual[:, 3].sum(), logits, retain_graph=True)[0]
+    a = torch.autograd.grad(actual.objective.sum(), logits, retain_graph=True)[0]
     b = torch.autograd.grad(reference[:, 0].sum(), logits)[0]
     torch.testing.assert_close(a, b)
 

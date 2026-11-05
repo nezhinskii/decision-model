@@ -2,6 +2,9 @@
 
 import hashlib
 import json
+import platform
+import subprocess
+from importlib.metadata import version
 from pathlib import Path
 
 
@@ -28,7 +31,7 @@ def cache_summary(path, manifest):
 def data_summary(path):
     """Preserve source identity, preparation seed, length budget and split sizes."""
     manifest = json.loads((path / "manifest.json").read_text())
-    length = manifest.get("length_filter", {})
+    length = manifest.get("length_filter") or {}
     return {
         "path": str(path.resolve()),
         "manifest_sha256": manifest_hash(manifest),
@@ -62,7 +65,7 @@ def data_summary(path):
     }
 
 
-def check_cache(run, path, manifest):
+def check_cache(run, manifest):
     """Also accept existing runs that saved the original full manifest."""
     summary = run / "cache_summary.json"
     if summary.exists():
@@ -73,3 +76,17 @@ def check_cache(run, path, manifest):
         matches = json.loads((run / "cache_manifest.json").read_text()) == manifest
     if not matches:
         raise ValueError("Cache manifest changed since training started")
+
+
+def environment_info():
+    """The same code and dependency identity for training and evaluation runs."""
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
+    return {
+        "git_commit": git("rev-parse", "HEAD"),
+        "git_status": git("status", "--porcelain"),
+        "python": platform.python_version(),
+        "torch": version("torch"),
+        "packages": {name: version(name) for name in
+                     ("accelerate", "safetensors", "mlflow", "pyarrow", "transformers")},
+    }

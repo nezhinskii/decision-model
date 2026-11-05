@@ -1,7 +1,6 @@
 """Materialize frozen features with restart progress at completed shard boundaries."""
 
 from dataclasses import asdict, dataclass, field, replace
-import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -9,13 +8,17 @@ from itertools import islice
 
 import torch
 import tyro
+
+from ..utils.files import file_hash
 from tqdm.auto import tqdm
 import pyarrow.parquet as pq
 
-from ..backbone.features import PoolingConfig, extract_features
+from ..backbone.pooling import PoolingConfig, extract_features
 from ..backbone.inputs import InputBuilder, InputConfig, InputTooLongError
-from ..backbone.model import BackboneConfig, FrozenBackbone
+from ..backbone.loading import BackboneConfig
+from ..backbone.model import FrozenBackbone
 from ..data.dataset import read_examples
+from .cache import cache_records
 
 
 @dataclass
@@ -31,53 +34,6 @@ class PrepareConfig:
     layers: tuple[int, ...] = (-1,)
     batch_size: int = 1
     shard_size: int = 256
-
-
-def file_hash(path: Path) -> str:
-    """Hash source files and completed shards without loading them into RAM."""
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def cache_records(features, examples) -> list[dict]:
-    """Detach each shared context into independent CPU tensors and aligned labels."""
-    records = []
-    q_start = o_start = 0
-    for index, example in enumerate(examples):
-        q_stop = q_start + len(example.questions)
-        o_stop = o_start + sum(len(q.options) for q in example.questions)
-        # clone() prevents a small slice from retaining the entire batch storage.
-        records.append(
-            {
-                "context_id": example.id,
-                "context": (
-                    features.contexts[index].detach().cpu().clone()
-                    if features.contexts is not None
-                    else None
-                ),
-                "questions": features.questions[q_start:q_stop].detach().cpu().clone(),
-                "options": features.options[o_start:o_stop].detach().cpu().clone(),
-                "option_to_question": (
-                    features.option_to_question[o_start:o_stop] - q_start
-                )
-                .cpu()
-                .clone(),
-                "targets": torch.tensor(
-                    [p for q in example.questions for p in q.target.probabilities],
-                    dtype=torch.float32,
-                ),
-                "question_ids": [q.id for q in example.questions],
-                "option_ids": [o.id for q in example.questions for o in q.options],
-                "categories": [q.category for q in example.questions],
-                # Keep storage as plain strings, not pickled enum instances, so
-                # torch.load(weights_only=True) needs no custom allowlist.
-                "tasks": [str(q.task) for q in example.questions],
-                "target_kinds": [str(q.target.kind) for q in example.questions],
-                "score_values": [q.score_values for q in example.questions],
-            }
-        )
-        q_start, o_start = q_stop, o_stop
-    return records
 
 
 def save_manifest(path: Path, manifest: dict) -> None:

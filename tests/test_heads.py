@@ -5,8 +5,8 @@ import pytest
 
 import torch
 
-from src.features import FeatureBatch
-from src.feature_cache.dataset import collate_features
+from src.features.schema import FeatureBatch
+from src.features.cache import collate_features
 from src.heads import HeadConfig, NormType, ProcessorType, ReadoutMode, build_head
 from src.heads.processors import JointBlock, pack_rows, prepare_context_attention
 from src.heads.readout import LayerReadout

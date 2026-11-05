@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from src.backbone import model
+from src.backbone import model, loading
 
 
 def test_description_and_tokenizer_share_resolved_commit_without_weights(monkeypatch, tokenizer):
@@ -21,11 +21,11 @@ def test_description_and_tokenizer_share_resolved_commit_without_weights(monkeyp
         return tokenizer
     def forbidden(*args, **kwargs):
         raise AssertionError('Weights must not load during description/tokenizer access')
-    monkeypatch.setattr(model, 'resolve_revision', resolve)
-    monkeypatch.setattr(model.AutoConfig, 'from_pretrained', config)
-    monkeypatch.setattr(model.AutoTokenizer, 'from_pretrained', load_tokenizer)
+    monkeypatch.setattr(loading, 'resolve_revision', resolve)
+    monkeypatch.setattr(loading.AutoConfig, 'from_pretrained', config)
+    monkeypatch.setattr(loading.AutoTokenizer, 'from_pretrained', load_tokenizer)
     monkeypatch.setattr(model.AutoModel, 'from_pretrained', forbidden)
-    backbone = model.FrozenBackbone(model.BackboneConfig(model_id='fake/model'))
+    backbone = model.FrozenBackbone(loading.BackboneConfig(model_id='fake/model'))
     assert calls == []
     assert backbone.describe()['revision'] == sha
     assert backbone.describe()['num_hidden_layers'] == 32

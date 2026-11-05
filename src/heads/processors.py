@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
-from ..features import FeatureBatch
+from ..features.schema import FeatureBatch
 from .readout import LayerReadout
 from .norms import NormType, make_norm
 

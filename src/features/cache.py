@@ -1,35 +1,56 @@
-"""CPU-only cache reading and collation; no backbone loading dependencies."""
+"""CPU-only cache serialization, reading and collation; no model loading."""
 
-from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import random
 
 import torch
-from torch.utils.data import IterableDataset, get_worker_info
-from ..features import FeatureBatch
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from .schema import FeatureBatch, LabeledFeatureBatch
 
 
-@dataclass
-class TrainingBatch:
-    """Head inputs plus supervision; targets follow features.options row order."""
-
-    features: FeatureBatch
-    targets: torch.Tensor  # [V], probabilities normalized within each question.
-    context_ids: list[str]  # B context IDs.
-    categories: list[str]  # Q category labels.
-    tasks: list[str]  # Q task labels.
-    target_kinds: list[str]  # Q hard/soft labels.
-    score_values: list[list[float] | None]  # Q entries, each K_q values or None.
-
-    def to(self, device: str | torch.device) -> "TrainingBatch":
-        """Move tensors for head training while keeping IDs and labels as lists."""
-        return replace(
-            self, features=self.features.to(device), targets=self.targets.to(device)
+def cache_records(features, examples) -> list[dict]:
+    """Detach each shared context into independent CPU tensors and aligned labels."""
+    records = []
+    q_start = o_start = 0
+    for index, example in enumerate(examples):
+        q_stop = q_start + len(example.questions)
+        o_stop = o_start + sum(len(q.options) for q in example.questions)
+        # clone() prevents a small slice from retaining the entire batch storage.
+        records.append(
+            {
+                "context_id": example.id,
+                "context": (
+                    features.contexts[index].detach().cpu().clone()
+                    if features.contexts is not None
+                    else None
+                ),
+                "questions": features.questions[q_start:q_stop].detach().cpu().clone(),
+                "options": features.options[o_start:o_stop].detach().cpu().clone(),
+                "option_to_question": (
+                    features.option_to_question[o_start:o_stop] - q_start
+                )
+                .cpu()
+                .clone(),
+                "targets": torch.tensor(
+                    [p for q in example.questions for p in q.target.probabilities],
+                    dtype=torch.float32,
+                ),
+                "question_ids": [q.id for q in example.questions],
+                "option_ids": [o.id for q in example.questions for o in q.options],
+                "categories": [q.category for q in example.questions],
+                # Keep storage as plain strings, not pickled enum instances, so
+                # torch.load(weights_only=True) needs no custom allowlist.
+                "tasks": [str(q.task) for q in example.questions],
+                "target_kinds": [str(q.target.kind) for q in example.questions],
+                "score_values": [q.score_values for q in example.questions],
+            }
         )
+        q_start, o_start = q_stop, o_stop
+    return records
 
 
-def collate_features(records: list[dict]) -> TrainingBatch:
+def collate_features(records: list[dict]) -> LabeledFeatureBatch:
     """Combine whole contexts and rebase option-to-question indices."""
     offset = 0
     links, context_links = [], []
@@ -49,7 +70,7 @@ def collate_features(records: list[dict]) -> TrainingBatch:
             raise ValueError("Cannot mix records with and without context features")
         contexts = None
 
-    return TrainingBatch(
+    return LabeledFeatureBatch(
         features=FeatureBatch(
             questions=torch.cat([r["questions"] for r in records]),
             options=torch.cat([r["options"] for r in records]),
@@ -134,3 +155,19 @@ class FeatureDataset(IterableDataset):
             if self.shuffle:
                 rng.shuffle(records)
             yield from records
+
+
+def make_loader(cache, split, context, batch_size, seed, shuffle=False):
+    dataset = FeatureDataset(
+        cache, split, shuffle=shuffle, seed=seed, include_context=context
+    )
+    # Dedicated generator prevents iterator creation/skipping from consuming model
+    # RNG on resume. num_workers=0 fixes the reproducible source cursor.
+    generator = torch.Generator().manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_features,
+        num_workers=0,
+        generator=generator,
+    )

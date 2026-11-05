@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from torch import nn
 
-from ..features import FeatureBatch
+from ..features.schema import FeatureBatch
 from .norms import NormType, make_norm
 
 

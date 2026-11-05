@@ -55,11 +55,11 @@ discarded; only question/option states are scored.
 ```python
 from pathlib import Path
 from torch.utils.data import DataLoader
-from src.feature_cache.dataset import FeatureDataset, collate_features
+from src.features.cache import FeatureDataset, collate_features
 from src.heads import HeadConfig, build_head
 
 config = HeadConfig(processor="joint", use_cross_attention=True, num_slots=64)
-needs_context = config.processor == "joint" and config.use_cross_attention
+needs_context = config.requires_context
 dataset = FeatureDataset(
     Path("artifacts/features/qwen35_4b_causal_2048"), "train",
     shuffle=True, include_context=needs_context,
@@ -72,6 +72,7 @@ logits = head(batch.features)  # [V], aligned with batch.targets
 # Training must apply log-softmax separately to each question's options.
 ```
 
+`config.requires_context` describes input requirements before model construction;
 `head.requires_context` describes the constructed head. `layer_indices=()` uses
 all cached layers; e.g. `(0, 2)` selects entries of the cache axis, not decoder
 depths. Actual depths are in feature metadata. Set `num_feature_layers` when

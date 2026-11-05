@@ -4,26 +4,24 @@ from dataclasses import asdict, dataclass, field
 from itertools import islice
 import json
 from pathlib import Path
-import subprocess
 import time
-import platform
-from importlib.metadata import version
 from enum import StrEnum
 
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from pydantic import TypeAdapter
 import torch
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import tyro
 
-from ..feature_cache.dataset import FeatureDataset, collate_features
+from ..features.cache import make_loader
 from ..heads import HeadConfig, build_head
-from .checkpoints import load_latest, save_latest, save_model, weight_hash
-from .loop import evaluate, train_step
-from .tracking import Tracker, BackgroundSync, write_json
-from .provenance import cache_summary, data_summary, check_cache
+from .checkpoints import load_latest, save_latest
+from ..heads.checkpoints import save_model
+from ..utils.files import file_hash, write_json
+from .loop import validate, train_step
+from ..experiments.tracking import Tracker, BackgroundSync
+from ..experiments.provenance import cache_summary, data_summary, check_cache, environment_info
 from .schedules import ScheduleType, CosineSchedule
 from .objectives import LossConfig, TRAIN_METRIC_NAMES
 from .early_stopping import EarlyStoppingConfig, EarlyStopping
@@ -65,22 +63,6 @@ class TrainConfig:
     save_every: int = 500
     resume: bool = True
     max_steps: int | None = None
-
-
-def make_loader(cache, split, context, batch_size, seed, shuffle=False):
-    dataset = FeatureDataset(
-        cache, split, shuffle=shuffle, seed=seed, include_context=context
-    )
-    # Dedicated generator prevents iterator creation/skipping from consuming model
-    # RNG on resume. num_workers=0 fixes the reproducible source cursor.
-    generator = torch.Generator().manual_seed(seed)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_features,
-        num_workers=0,
-        generator=generator,
-    )
 
 
 def train(config: TrainConfig):
@@ -127,7 +109,7 @@ def train(config: TrainConfig):
     if accelerator.num_processes != 1:
         raise ValueError("This initial training loop supports one process only")
     set_seed(config.seed)
-    context = config.head.processor == "joint" and config.head.use_cross_attention
+    context = config.head.requires_context
     train_loader = make_loader(
         config.cache, "train", context, config.batch_size, config.seed, True
     )
@@ -136,7 +118,7 @@ def train(config: TrainConfig):
     )
     # Reject an incompatible cache before reopening the tracking run as RUNNING.
     if resuming:
-        check_cache(root, config.cache, train_loader.dataset.manifest)
+        check_cache(root, train_loader.dataset.manifest)
     first = next(iter(train_loader))
     dimensions = {
         "input_dim": first.features.questions.shape[-1],
@@ -179,36 +161,14 @@ def train(config: TrainConfig):
                 data_summary(Path(prepared_path)),
             )
 
-        def git(*args):
-            return subprocess.run(
-                ["git", *args], capture_output=True, text=True
-            ).stdout.strip()
-
-        write_json(
-            root / "provenance.json",
-            {
-                **dimensions,
-                "git_commit": git("rev-parse", "HEAD"),
-                "git_status": git("status", "--porcelain"),
-                "cache": str(config.cache.resolve()),
-                "parameters": sum(p.numel() for p in model.parameters()),
-                "torch": torch.__version__,
-            },
-        )
-        provenance = json.loads((root / "provenance.json").read_text())
-        provenance.update(
-            {
-                "python": platform.python_version(),
-                "device": str(accelerator.device),
-                "packages": {
-                    name: version(name)
-                    for name in ("accelerate", "safetensors", "mlflow", "pyarrow")
-                },
-                "learning_rate_schedule": str(config.schedule),
-                "schedule_steps": total_schedule_steps if scheduler is not None else None,
-            }
-        )
-        write_json(root / "provenance.json", provenance)
+        write_json(root / "provenance.json", {
+            **environment_info(), **dimensions,
+            "cache": str(config.cache.resolve()),
+            "parameters": sum(p.numel() for p in model.parameters()),
+            "device": str(accelerator.device),
+            "learning_rate_schedule": str(config.schedule),
+            "schedule_steps": total_schedule_steps if scheduler is not None else None,
+        })
     for name in ("config.json", "cache_summary.json", "provenance.json"):
         if not (root / name).exists():
             continue
@@ -234,10 +194,10 @@ def train(config: TrainConfig):
     progress['early_stopping'] = stopper.state
     sender = BackgroundSync(root, config.remote_uri)
 
-    def validate():
+    def record_validation():
         if progress['step'] <= stopper.state['last_step']:
             return
-        metrics = evaluate(model, val_loader, accelerator)
+        metrics = validate(model, val_loader, accelerator)
         tracker.log(
             {f"validation/{k}": v for k, v in metrics.items()}, progress["step"]
         )
@@ -256,7 +216,7 @@ def train(config: TrainConfig):
                 root / "best.json",
                 {
                     "weights": str(weights.relative_to(root)),
-                    "sha256": weight_hash(weights),
+                    "sha256": file_hash(weights),
                     "step": progress["step"],
                     "metrics": metrics,
                 },
@@ -337,7 +297,7 @@ def train(config: TrainConfig):
                         log_interval()
                     if progress["step"] % config.validate_every == 0:
                         log_interval()
-                        validate()
+                        record_validation()
                         if stopper.stopped:
                             break
                         if accelerator.device.type == "cuda":
@@ -352,7 +312,7 @@ def train(config: TrainConfig):
                 else:
                     progress["epoch"], progress["batch"] = epoch + 1, 0
                 log_interval()
-            validate()
+            record_validation()
             save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
             if stopper.stopped:
                 tqdm.write(f"Early stopping at step {progress['step']}: "

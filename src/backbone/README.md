@@ -3,9 +3,10 @@
 - `inputs.py`: serialize common-format examples, retain content spans, build a
   matching branch positions, then right-pad batches. Independent modes also build
   a dense allowed-attention mask; causal batches leave `allowed_attention=None`.
-- `model.py`: lazy frozen `AutoModel` wrapper, local Hub cache, optional NF4 loading
-  and selected decoder outputs. No language-model output head is loaded by this API.
-- `features.py`: last/mean pooling into flat question and option tensors, plus
+- `loading.py`: shared revision/tokenizer resolution and dtype/NF4/device settings.
+- `model.py`: frozen `AutoModel` wrapper and selected decoder outputs.
+  No language-model output head is loaded by this API.
+- `pooling.py`: last/mean pooling into flat question and option tensors, plus
   optional final-layer context memory.
 
 ## Loading and model choice
@@ -35,8 +36,9 @@ Independent branches remain limited to Qwen3/Llama full-attention layouts;
 Qwen3.5's recurrent state cannot be isolated by a 4D attention mask.
 Qwen3.5's optional DeltaNet kernels affect speed and memory; the wrapper does not
 install them automatically. Pretrained/NF4 Qwen3.5 execution is not yet verified.
-No LoRA or native LM-head baseline is implemented yet. Pooled feature-cache
-preparation and loading are described in [../feature_cache/README.md](../feature_cache/README.md).
+LoRA is not implemented. Native LM-head evaluation lives in
+[`src/evaluation`](../evaluation/README.md), using the separate native LM wrapper. Pooled feature-cache
+preparation and loading are described in [../features/README.md](../features/README.md).
 
 ## Input settings
 
@@ -105,7 +107,7 @@ separators and padding. Option content includes its criteria. Decision always us
 the last token of its marker. Optional context memory comes from the final layer
 only; that layer must be requested. Returned metadata records input and pooling
 settings and the layer convention for future caching.
-The returned container is the shared `src.features.FeatureBatch`, also used by
+The returned container is the shared `src.features.schema.FeatureBatch`, also used by
 the cache reader. It contains head inputs only, without targets, and `.to(device)`
 preserves gradient connections for future trainable-backbone use.
 
