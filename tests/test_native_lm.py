@@ -119,7 +119,7 @@ def test_prompt_omits_targets_and_contains_criteria(example):
 def test_bad_continuation_tokenization_fails():
     tokenizer = Tokenizer()
     assert candidate_sequences(tokenizer, "prefix\n\n", 2) == [(65,), (66,)]
-    with pytest.raises(ValueError, match="round-trip"):
+    with pytest.raises(ValueError, match="expected boundary"):
         candidate_sequences(tokenizer, "prefix", 2, [1])
     tokenizer.encode = lambda text, **kwargs: [0] if text.endswith("A") else [0, 1]
     with pytest.raises(ValueError, match="continuation"):
@@ -251,3 +251,16 @@ def test_requested_nf4_must_actually_be_loaded():
     lm.config.quantization = "nf4"
     with pytest.raises(RuntimeError, match="no 4-bit"):
         lm.load()
+
+
+def test_noncanonical_reasoning_does_not_require_tokenizer_round_trip(example):
+    lm = wrapper("thinking")
+    decode = lm.tokenizer.decode
+    # The original generated token IDs still contain "evidence". Decoding them
+    # has a different canonical spelling, as can happen with real tokenizers.
+    lm.tokenizer.decode = lambda ids, **kwargs: decode(ids, **kwargs).replace("evidence", "canonical")
+    result = lm.predict(example.context, example.questions[0])
+    assert result["status"] == "ok"
+    assert result["scores"] == [1, 3]
+    assert result["scoring_forward_tokens"] == 3
+    assert result["cache_reused_tokens"] > result["input_tokens"]

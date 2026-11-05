@@ -293,8 +293,9 @@ class NativeLM(ModelSource):
                 result["seconds"] = time.perf_counter() - started
                 self._log_profile(result)
                 return result
-            answer_prefix = self.tokenizer.decode(
-                inputs[0].tolist(), skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            # Only the stable special-token boundary is needed for label
+            # tokenization; generated reasoning IDs and cache remain untouched.
+            answer_prefix = "</think>" + ANSWER_SUFFIX
         if limit is not None and inputs.shape[1] + label_reserve > limit:
             return {**result, "status": "context_limit", "seconds": time.perf_counter() - started}
         self._synchronize(device)

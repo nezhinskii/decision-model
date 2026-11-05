@@ -33,8 +33,9 @@ interrupted v1 run can resume without recomputing its completed answers.
 Direct uses `enable_thinking=False`: the template already provides a closed empty
 reasoning block. Thinking generates until the complete `</think>` token sequence;
 the runner then appends exactly two newlines. Both modes score the next token
-after `</think>\n\n`. No `Answer:` prefix is injected. After reasoning, tokenization
-is checked against the actual generated token sequence before scoring.
+after `</think>\n\n`. No `Answer:` prefix is injected. After reasoning, label tokenization
+is checked at the exact closing boundary in the original token IDs; arbitrary
+generated reasoning is never decoded and re-encoded for scoring.
 
 Candidate vocabulary logits are returned in the original option order. Metrics
 use softmax across valid labels at temperature 1. `label_probability_mass` records
@@ -75,3 +76,18 @@ and argument conventions, retaining the same mutable convolution-state buffer.
 Its module-level scope and removal conditions are documented in the code.
 Runtime logs identify it explicitly as `[triton bridge]`. Numerical agreement is
 validated within tolerances, rather than requiring bit-identical output.
+
+
+For an isolated speed comparison, stop other GPU jobs and run:
+
+```bash
+uv run python -m src.native_lm.benchmark
+```
+
+This sequentially measures minimal NF4 generation, the project's reasoning helper
+with NF4, and minimal BF16 generation. The same pinned student, prompt IDs, FLA
+bridge and greedy settings are used. EOS and the closing reasoning token are
+suppressed until the fixed 256-token budget in all paths. Each mode gets one
+full-length warmup and three measurements; reported speed includes prefill.
+There is no scoring, dataset access or MLflow. Results are saved incrementally to
+`artifacts/diagnostics/native_generation.json`; model loading is not timed.
