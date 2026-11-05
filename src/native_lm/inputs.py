@@ -7,10 +7,18 @@ ANSWER_SUFFIX = "\n\n"
 LABELS = ascii_uppercase + ascii_lowercase
 
 
+def option_labels(count):
+    """Keep existing letter prompts; use fixed-width numbers for larger sets."""
+    if count < 1:
+        raise ValueError("Questions must have at least one option")
+    if count <= len(LABELS):
+        return list(LABELS[:count])
+    width = len(str(count))
+    return [str(i).zfill(width) for i in range(1, count + 1)]
+
+
 def render_question(context, question):
-    if not 1 <= len(question.options) <= len(LABELS):
-        raise ValueError(f"Expected 1..{len(LABELS)} options: {question.id}")
-    labels = LABELS[:len(question.options)]
+    labels = option_labels(len(question.options))
     options = []
     for label, option in zip(labels, question.options):
         text = f"{label}: {option.text}"
@@ -23,20 +31,25 @@ def render_question(context, question):
               "Your final answer must contain only the option label, with no explanation.")
 
 
-def candidate_tokens(tokenizer, prefix, count, prefix_ids=None):
-    """Validate continuation tokenization, including the answer boundary."""
+def candidate_sequences(tokenizer, prefix, count, prefix_ids=None):
+    """Tokenize complete candidate labels, checking the answer boundary."""
     before = tokenizer.encode(prefix, add_special_tokens=False)
     if prefix_ids is not None and before != prefix_ids:
         raise ValueError("Answer prefix does not round-trip through tokenizer")
-    ids = []
-    for label in LABELS[:count]:
+    sequences = []
+    for label in option_labels(count):
         after = tokenizer.encode(prefix + label, add_special_tokens=False)
-        if after[:-1] != before or len(after) != len(before) + 1:
-            raise ValueError(f"Label {label!r} is not a single continuation token")
-        ids.append(after[-1])
-    if len(set(ids)) != count:
-        raise ValueError("Candidate labels must have distinct token IDs")
-    return ids
+        if after[:len(before)] != before or len(after) <= len(before):
+            raise ValueError(f"Label {label!r} is not a valid continuation")
+        sequences.append(tuple(after[len(before):]))
+    if len(set(sequences)) != count:
+        raise ValueError("Candidate labels must have distinct token sequences")
+    # Labels of equal character width have no textual prefix ambiguity. Verify
+    # that the tokenizer preserves that property before interpreting their mass.
+    ordered = sorted(sequences)
+    if any(right[:len(left)] == left for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("One candidate token sequence is a prefix of another")
+    return sequences
 
 
 def build_prompt(tokenizer, context, question, thinking):

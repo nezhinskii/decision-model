@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from src.backbone.loading import BackboneConfig
-from src.native_lm.inputs import build_prompt, candidate_tokens, render_question
+from src.native_lm.inputs import build_prompt, candidate_sequences, option_labels, render_question
 from src.native_lm.model import NativeLM, NativeLMConfig, StopAtTokens
 
 
@@ -95,18 +95,19 @@ def test_prompt_omits_targets_and_contains_criteria(example):
     assert render_question(example.context, q) == render_question(example.context, changed)
     assert "Criteria: rule" in render_question(example.context, q)
     assert "A: yes" in render_question(example.context, q)
-    with pytest.raises(ValueError, match="options"):
-        render_question(example.context, replace(q, options=q.options * 27))
+    assert "01: yes" in render_question(example.context, replace(q, options=q.options * 27))
+    with pytest.raises(ValueError, match="option"):
+        render_question(example.context, replace(q, options=[]))
 
 
 def test_bad_continuation_tokenization_fails():
     tokenizer = Tokenizer()
-    assert candidate_tokens(tokenizer, "prefix\n\n", 2) == [65, 66]
+    assert candidate_sequences(tokenizer, "prefix\n\n", 2) == [(65,), (66,)]
     with pytest.raises(ValueError, match="round-trip"):
-        candidate_tokens(tokenizer, "prefix", 2, [1])
+        candidate_sequences(tokenizer, "prefix", 2, [1])
     tokenizer.encode = lambda text, **kwargs: [0] if text.endswith("A") else [0, 1]
     with pytest.raises(ValueError, match="continuation"):
-        candidate_tokens(tokenizer, "prefix", 2)
+        candidate_sequences(tokenizer, "prefix", 2)
 
 
 def test_unsupported_template_fails(example):
@@ -147,3 +148,27 @@ def test_text_lm_loads_native_weights_from_multimodal_checkpoint(tmp_path):
         expected = source(input_ids=tokens, logits_to_keep=1).logits
         actual = loaded(input_ids=tokens, logits_to_keep=1).logits
     torch.testing.assert_close(actual, expected)
+
+
+def test_large_candidate_set_uses_complete_sequence_probabilities():
+    lm = wrapper()
+    class SequenceModel(Model):
+        def forward(self, input_ids, **kwargs):
+            self.forward_calls += 1
+            logits = torch.zeros(1, 1, 256)
+            root = self.tokenizer.decode(input_ids[0].tolist()).endswith("</think>\n\n")
+            logits[0, 0, ord("5") if root else ord("4")] = 4 if root else 3
+            return SimpleNamespace(logits=logits)
+    lm._model = SequenceModel(lm.tokenizer)
+    prefix = "</think>\n\n"
+    inputs = torch.tensor([lm.tokenizer.encode(prefix)])
+    result = lm._score_options(lm._model, inputs, prefix, 54)
+    root, following = torch.zeros(256), torch.zeros(256)
+    root[ord("5")], following[ord("4")] = 4, 3
+    root, following = root.log_softmax(0), following.log_softmax(0)
+    expected = [float(root[ord(label[0])] + following[ord(label[1])])
+                for label in option_labels(54)]
+    torch.testing.assert_close(torch.tensor(result["scores"]), torch.tensor(expected))
+    assert int(torch.tensor(result["scores"]).argmax()) == 53
+    assert lm._model.forward_calls == 7  # Root plus six distinct first digits.
+    assert result["label_probability_mass"] == pytest.approx(float(torch.tensor(expected).exp().sum()))

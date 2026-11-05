@@ -18,10 +18,17 @@ still need checking on the experiment machine.
 
 ## Answer position
 
-Each option gets a case-sensitive label from `A..Z,a..z` (at most 52 options).
-Every label must be exactly one distinct continuation token at the actual answer
-position. Unsupported tokenization raises an error instead of silently changing
-scoring. The instruction requests only a label as the final answer.
+Up to 52 options retain the original case-sensitive `A..Z,a..z` labels.
+Larger sets use fixed-width numbers (`01..54`, `001..120`, etc.). No option-count
+cap is imposed by the label alphabet. Labels are tokenized at the actual answer
+boundary and must have distinct, non-prefix token sequences.
+
+Single-token labels use one scoring forward as before. Multi-token labels use
+summed autoregressive log probabilities of the complete label, with one forward
+per shared token prefix. They are not scored using only their first token and
+are not length-normalized. This fallback can be slower for very large sets.
+Prompts and scores for previously supported questions remain unchanged, so an
+interrupted v1 run can resume without recomputing its completed answers.
 
 Direct uses `enable_thinking=False`: the template already provides a closed empty
 reasoning block. Thinking generates until the complete `</think>` token sequence;
