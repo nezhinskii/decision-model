@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 
 from ..backbone.loading import BackboneConfig, ModelSource
 from .inputs import ANSWER_SUFFIX, build_prompt, candidate_sequences
+from .kernels import install_qwen_convolutions
 
 
 class InferenceMode(StrEnum):
@@ -62,6 +63,9 @@ class NativeLM(ModelSource):
                 self.config.model_id, **self._model_kwargs(config))
             self._model.requires_grad_(False).eval()
         if self.runtime_info is None:
+            # Use installed FLA convolutions when Dao kernels are unavailable;
+            # see kernels.py for the Windows rationale and monkey-patch scope.
+            install_qwen_convolutions(self._model)
             self._report_runtime(self._model)
         return self._model
 
@@ -92,6 +96,9 @@ class NativeLM(ModelSource):
         for name in ("causal_conv1d_fn", "causal_conv1d_update",
                      "torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule"):
             function = getattr(module, name, None)
+            if getattr(function, "kernel_provider", None):
+                providers[name] = function.kernel_provider
+                continue
             visited = set()
             while callable(function) and id(function) not in visited:
                 visited.add(id(function))

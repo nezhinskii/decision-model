@@ -11,7 +11,7 @@ Install `uv` and an NVIDIA driver for GPU workloads, then run:
 uv sync --locked
 ```
 
-The same installation includes GPU kernels, notebook tools and pytest. For
+The same installation includes FLA kernels, notebook tools and pytest. For
 notebooks, select the project `.venv` kernel; no dependency groups are required.
 
 Dependencies are selected automatically for Linux and Windows (x86-64).
@@ -20,6 +20,14 @@ Linux uses FLA's CUDA extra and standard Triton; Windows uses FLA with
 command on either platform. Windows kernel execution still depends on the GPU,
 driver and the Windows Triton runtime; resolving dependencies does not validate
 kernel execution.
+
+Transformers normally selects fast Qwen3.5 convolutions from `causal-conv1d`.
+Official Dao wheels currently target Linux. When Dao kernels are unavailable,
+`src/native_lm/kernels.py` bridges the reference convolution calls to the installed
+FLA Triton kernels (including Windows with triton-windows). This runtime monkey
+patch preserves existing optimized Dao kernels and the original CPU path.
+Its rationale and compatibility boundary are documented in that module. Check
+the native LM runtime report for the actual convolution providers.
 
 ## Checks
 

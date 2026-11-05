@@ -66,3 +66,12 @@ Internally, `NativeLM.predict` orchestrates three operations in the same class:
 `_prepare_input` builds and validates the prompt, `_generate_reasoning` optionally
 runs generation up to the closing boundary, and `_score_options` reads candidate
 logits. Dataset iteration, output files, reports and tracking remain in evaluation.
+
+`kernels.py` contains a compatibility monkey patch for Qwen3.5 convolutions:
+Transformers normally discovers Dao kernels, not FLA convolutions. On CUDA,
+reference convolution calls are bridged to installed FLA Triton kernels; existing
+optimized Dao kernels and CPU behavior are preserved. The bridge changes layout
+and argument conventions, retaining the same mutable convolution-state buffer.
+Its module-level scope and removal conditions are documented in the code.
+Runtime logs identify it explicitly as `[triton bridge]`. Numerical agreement is
+validated within tolerances, rather than requiring bit-identical output.
