@@ -44,7 +44,4 @@ class NativeLMSource:
 
     def predict(self, batch):
         example, question = batch
-        output = self.model.predict(example.context, question)
-        if getattr(self.model, "runtime_info", None) is not None:
-            self.provenance["runtime"] = self.model.runtime_info
-        return [output]
+        return [self.model.predict(example.context, question)]

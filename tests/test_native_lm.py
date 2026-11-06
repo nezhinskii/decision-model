@@ -85,8 +85,6 @@ def test_scores_address_original_options_and_reasoning_boundary(example, mode):
     assert result["reasoning_tokens"] > 0 if mode == "thinking" else result["reasoning_tokens"] == 0
     assert "reasoning" not in result
     if mode == "thinking":
-        assert result["cache_reused_tokens"] > result["input_tokens"]
-        assert result["scoring_forward_tokens"] == 3
         assert lm._model.last_forward_tokens == 3
 
 
@@ -189,7 +187,6 @@ def test_large_candidate_set_uses_complete_sequence_probabilities():
                 for label in option_labels(54)]
     torch.testing.assert_close(torch.tensor(result["scores"]), torch.tensor(expected))
     assert int(torch.tensor(result["scores"]).argmax()) == 53
-    assert result["scoring_forward_tokens"] == len(prefix) + 6
     assert lm._model.forward_calls == 7  # Root plus six distinct first digits.
     assert result["label_probability_mass"] == pytest.approx(float(torch.tensor(expected).exp().sum()))
 
@@ -226,7 +223,6 @@ def test_hybrid_cache_branches_match_full_prefix_scoring(monkeypatch):
     cached = model(inputs[:, :-3], use_cache=True).past_key_values
     reused = lm._score_options(model, inputs, prefix, 54, cached)
     torch.testing.assert_close(torch.tensor(reused["scores"]), torch.stack(expected), atol=2e-5, rtol=2e-5)
-    assert reused["scoring_forward_tokens"] == 3 + 6
 
     original_generate = model.generate
     forced = lm.tokenizer.encode("x</think>")
@@ -240,15 +236,18 @@ def test_hybrid_cache_branches_match_full_prefix_scoring(monkeypatch):
     full = lm._score_options(model, answer, answer_prefix, 54)
     torch.testing.assert_close(torch.tensor(reused["scores"]), torch.tensor(full["scores"]),
                                atol=2e-5, rtol=2e-5)
-    assert reused["cache_reused_tokens"] == answer.shape[1] - 3
-    assert reused["scoring_forward_tokens"] == 3 + 6
     assert timing["reasoning_tokens"] == len(forced)
-    assert timing["prefill_seconds"] > 0
 
 
-def test_requested_nf4_must_actually_be_loaded():
+def test_requested_nf4_must_actually_be_loaded(monkeypatch):
+    from src.native_lm.model import AutoModelForCausalLM
     lm = wrapper()
+    model = lm._model
+    lm._model = None
     lm.config.quantization = "nf4"
+    monkeypatch.setattr(lm, "_load_config", lambda: SimpleNamespace(model_type="fake"))
+    monkeypatch.setattr(lm, "_model_kwargs", lambda config: {})
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", lambda *args, **kwargs: model)
     with pytest.raises(RuntimeError, match="no 4-bit"):
         lm.load()
 
@@ -262,5 +261,3 @@ def test_noncanonical_reasoning_does_not_require_tokenizer_round_trip(example):
     result = lm.predict(example.context, example.questions[0])
     assert result["status"] == "ok"
     assert result["scores"] == [1, 3]
-    assert result["scoring_forward_tokens"] == 3
-    assert result["cache_reused_tokens"] > result["input_tokens"]

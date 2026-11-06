@@ -48,15 +48,9 @@ Multi-token labels share cached prefixes. At branches both attention KV and
 mutable recurrent state are cloned; depth-first traversal bounds retained copies.
 Per-token generation logits are not retained.
 
-Startup logs report actual 4-bit modules, dtype, attention backend and resolved
-hybrid kernel providers, warning when reference PyTorch kernels remain active.
-The first three predictions and every 25th print generation/prefill/decode/scoring
-times and reused-cache/forward token counts. Phase timings, cache counters and CUDA
-memory peaks are saved with predictions and aggregated in evaluation metrics.
-Decode throughput excludes the first prefill forward; generation throughput includes
-it. Old resumed predictions remain valid but do not enter the new phase rates;
-`evaluation/profiled_questions` identifies their coverage. Use a new run name for
-an entirely fresh speed measurement.
+Detailed runtime/kernel inspection, memory measurements, timing comparisons and
+CPU/CUDA profiling live only in `benchmark.py`. Normal inference does not install
+profiling hooks or emit per-question performance diagnostics.
 
 Reasoning text is saved only with `--inference.save-reasoning`; this text then
 becomes part of the prediction artifact uploaded to MLflow. Timing includes
@@ -89,5 +83,22 @@ with NF4, and minimal BF16 generation. The same pinned student, prompt IDs, FLA
 bridge and greedy settings are used. EOS and the closing reasoning token are
 suppressed until the fixed 256-token budget in all paths. Each mode gets one
 full-length warmup and three measurements; reported speed includes prefill.
-There is no scoring, dataset access or MLflow. Results are saved incrementally to
+There is no scoring, dataset access or MLflow. By default the command also captures
+CPU/CUDA profiles of minimal NF4 and BF16 decode after warmup. Results are saved incrementally to
 `artifacts/diagnostics/native_generation.json`; model loading is not timed.
+
+
+To capture only profiles without repeating the speed comparisons:
+
+```bash
+uv run python -m src.native_lm.benchmark --profile-only
+```
+
+Each minimal mode gets a warmup, then profiles 32 decode steps (prefill and four
+extra decode warmup steps are excluded). The profiler is deliberately separate
+from throughput measurements because it adds overhead. Alongside the JSON report,
+`*_nf4_minimal.operators.txt` and `*_none_minimal.operators.txt` contain CPU/CUDA
+tables, while `*.trace.json` files contain timelines for Perfetto/Chrome tracing.
+The timeline shows CPU dispatch gaps that operator totals alone cannot reveal.
+If CUDA profiling is unavailable (e.g. CUPTI missing), the command explicitly
+warns that the trace contains no CUDA events. Use `--no-profile` for speed only.

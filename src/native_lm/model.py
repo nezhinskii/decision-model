@@ -3,12 +3,9 @@
 from dataclasses import dataclass
 from enum import StrEnum
 import copy
-import importlib
-import inspect
 import time
 import torch
 from transformers import AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
-from tqdm.auto import tqdm
 
 from ..backbone.loading import BackboneConfig, ModelSource
 from .inputs import ANSWER_SUFFIX, build_prompt, candidate_sequences
@@ -49,8 +46,6 @@ class NativeLM(ModelSource):
     def __init__(self, backbone: BackboneConfig, inference: NativeLMConfig):
         super().__init__(backbone)
         self.inference = inference
-        self.runtime_info = None
-        self._profile_count = 0
 
     def load(self):
         if self._model is None:
@@ -62,11 +57,13 @@ class NativeLM(ModelSource):
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_id, **self._model_kwargs(config))
             self._model.requires_grad_(False).eval()
-        if self.runtime_info is None:
-            # Use installed FLA convolutions when Dao kernels are unavailable;
-            # see kernels.py for the Windows rationale and monkey-patch scope.
+            # Runtime compatibility, not diagnostics; see kernels.py.
             install_qwen_convolutions(self._model)
-            self._report_runtime(self._model)
+            if self.config.quantization == "nf4" and not (
+                getattr(self._model, "is_loaded_in_4bit", False)
+                or any(type(m).__name__ == "Linear4bit" for m in self._model.modules())
+            ):
+                raise RuntimeError("NF4 was requested but the loaded model has no 4-bit linear layers")
         return self._model
 
     def _prepare_input(self, context, question):
@@ -82,95 +79,24 @@ class NativeLM(ModelSource):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
-    def _report_runtime(self, model):
-        """Report actual loaded modules and resolved kernels, not just requested options."""
-        device = model.get_input_embeddings().weight.device
-        quantized_modules = [module for module in model.modules() if type(module).__name__ == "Linear4bit"]
-        quantized = len(quantized_modules)
-        loaded_4bit = bool(getattr(model, "is_loaded_in_4bit", False) or quantized)
-        if self.config.quantization == "nf4" and not loaded_4bit:
-            raise RuntimeError("NF4 was requested but the loaded model has no 4-bit linear layers")
-        footprint = model.get_memory_footprint() / 1024**3 if hasattr(model, "get_memory_footprint") else None
-        providers = {}
-        module = importlib.import_module(type(model).__module__)
-        for name in ("causal_conv1d_fn", "causal_conv1d_update",
-                     "torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule"):
-            function = getattr(module, name, None)
-            if getattr(function, "kernel_provider", None):
-                providers[name] = function.kernel_provider
-                continue
-            visited = set()
-            while callable(function) and id(function) not in visited:
-                visited.add(id(function))
-                try:
-                    bindings = inspect.getclosurevars(function).nonlocals
-                except TypeError:
-                    break
-                if "implementation" in bindings:
-                    implementation = bindings["implementation"]
-                    provider = f"{implementation.__module__}.{implementation.__name__}"
-                    if not bindings.get("is_new_implementation", True):
-                        provider = "TORCH_REFERENCE (slow): " + provider
-                    providers[name] = provider
-                    break
-                function = getattr(function, "__wrapped__", None)
-        self.runtime_info = dict(
-            device=str(device), loaded_in_4bit=loaded_4bit, linear4bit_modules=quantized,
-            quantized_compute_dtypes=sorted({str(module.compute_dtype) for module in quantized_modules}),
-            gpu_name=torch.cuda.get_device_name(device) if device.type == "cuda" else None,
-            embedding_dtype=str(model.get_input_embeddings().weight.dtype),
-            weights_gib=footprint, kernels=providers,
-            attention_backend=getattr(model.config, "_attn_implementation", "unknown"),
-        )
-        tqdm.write(f"Native LM runtime: {self.runtime_info}")
-        tqdm.write("Cache policy: reuse generation cache; clone state at candidate branches; no full-prefix replay.")
-        if any("TORCH_REFERENCE" in value for value in providers.values()):
-            tqdm.write("PERFORMANCE: reference PyTorch kernels are active. Cache reuse does not remove this kernel bottleneck.")
-
     def _generate_reasoning(self, model, inputs, budget):
-        """Return answer tokens, generation cache and phase timings (no scoring replay)."""
+        """Return answer tokens, generation cache and optional reasoning text."""
         tokenizer = self.tokenizer
         closing = tokenizer.encode("</think>", add_special_tokens=False)
         if not closing:
             raise ValueError("Empty reasoning boundary")
         device = inputs.device
-        first = {}
-
-        def prefill_start(module, args):
-            if not first:
-                self._synchronize(device)
-                first["started"] = time.perf_counter()
-
-        def prefill_end(module, args, output):
-            if "seconds" not in first:
-                self._synchronize(device)
-                first["seconds"] = time.perf_counter() - first["started"]
-
-        # Time the first generation forward separately from subsequent decode.
-        hooks = [model.register_forward_pre_hook(prefill_start), model.register_forward_hook(prefill_end)]
-        self._synchronize(device)
-        started = time.perf_counter()
-        try:
-            generated = model.generate(
-                input_ids=inputs, attention_mask=torch.ones_like(inputs),
-                do_sample=False, use_cache=True, max_new_tokens=budget,
-                stopping_criteria=StoppingCriteriaList([StopAtTokens(closing)]),
-                return_dict_in_generate=True, output_scores=False, output_logits=False,
-                pad_token_id=(tokenizer.pad_token_id if tokenizer.pad_token_id is not None
-                              else tokenizer.eos_token_id),
-            )
-            self._synchronize(device)
-        finally:
-            for hook in hooks:
-                hook.remove()
-        elapsed = time.perf_counter() - started
+        generated = model.generate(
+            input_ids=inputs, attention_mask=torch.ones_like(inputs),
+            do_sample=False, use_cache=True, max_new_tokens=budget,
+            stopping_criteria=StoppingCriteriaList([StopAtTokens(closing)]),
+            return_dict_in_generate=True, output_scores=False, output_logits=False,
+            pad_token_id=(tokenizer.pad_token_id if tokenizer.pad_token_id is not None
+                          else tokenizer.eos_token_id),
+        )
         sequences = generated.sequences
         reasoning = sequences[0, inputs.shape[1]:].tolist()
-        prefill_seconds = first.get("seconds", 0.)
-        metadata = dict(reasoning_tokens=len(reasoning), generation_seconds=elapsed,
-                        prefill_seconds=prefill_seconds,
-                        decode_seconds=max(0., elapsed - prefill_seconds),
-                        decode_tokens=max(0, len(reasoning) - 1))
+        metadata = dict(reasoning_tokens=len(reasoning))
         if self.inference.save_reasoning:
             metadata["reasoning"] = tokenizer.decode(
                 reasoning, skip_special_tokens=False, clean_up_tokenization_spaces=False)
@@ -207,12 +133,10 @@ class NativeLM(ModelSource):
             raise RuntimeError("Scoring requires an uncached answer suffix")
         tail = inputs[:, cached:]
         logits, root_cache = self._cached_forward(model, tail, cache)
-        profile = dict(cache_reused_tokens=cached, scoring_forward_tokens=tail.shape[1],
-                       scoring_forwards=1, cache_branch_copies=0)
         if all(len(sequence) == 1 for sequence in sequences):
             selected = logits[[sequence[0] for sequence in sequences]]
             mass = (selected.logsumexp(0) - logits.logsumexp(0)).exp().item()
-            return dict(scores=selected.cpu().tolist(), label_probability_mass=mass, **profile)
+            return dict(scores=selected.cpu().tolist(), label_probability_mass=mass)
 
         continuations = {}
         for sequence in sequences:
@@ -232,49 +156,27 @@ class NativeLM(ModelSource):
                 branch_cache = prefix_cache
                 if i < len(branches) - 1:
                     branch_cache = copy.deepcopy(prefix_cache)
-                    profile["cache_branch_copies"] += 1
                 next_logits, branch_cache = self._cached_forward(
                     model, torch.tensor([[token]], device=inputs.device), branch_cache)
-                profile["scoring_forward_tokens"] += 1
-                profile["scoring_forwards"] += 1
                 visit(prefix + (token,), next_logits, branch_cache)
 
         visit((), logits, root_cache)
         scores = [sum(edges[sequence[:i]][token] for i, token in enumerate(sequence))
                   for sequence in sequences]
         mass = torch.tensor(scores, dtype=torch.float64).logsumexp(0).exp().item()
-        return dict(scores=scores, label_probability_mass=mass, **profile)
-
-    def _log_profile(self, result):
-        self._profile_count += 1
-        if self._profile_count <= 3 or self._profile_count % 25 == 0:
-            decode_seconds = result.get("decode_seconds", 0)
-            decode_rate = result.get("decode_tokens", 0) / decode_seconds if decode_seconds > 0 else 0
-            tqdm.write(
-                f"Inference #{self._profile_count}: generation={result.get('generation_seconds', 0):.3f}s "
-                f"prefill={result.get('prefill_seconds', 0):.3f}s "
-                f"decode={decode_seconds:.3f}s ({decode_rate:.1f} tok/s) "
-                f"scoring={result.get('scoring_seconds', 0):.3f}s "
-                f"reasoning_tokens={result['reasoning_tokens']} "
-                f"reused_cache_tokens={result.get('cache_reused_tokens', 0)} "
-                f"scoring_forward_tokens={result.get('scoring_forward_tokens', 0)} "
-                f"scoring_forwards={result.get('scoring_forwards', 0)}")
+        return dict(scores=scores, label_probability_mass=mass)
 
     @torch.inference_mode()
     def predict(self, context, question):
         prompt, tokens, sequences = self._prepare_input(context, question)
         label_reserve = max(len(sequence) for sequence in sequences) - 1
-        result = dict(status="ok", scores=None, input_tokens=len(tokens), reasoning_tokens=0,
-                      generation_seconds=0., prefill_seconds=0., decode_seconds=0.,
-                      decode_tokens=0, scoring_seconds=0.)
+        result = dict(status="ok", scores=None, input_tokens=len(tokens), reasoning_tokens=0)
         if len(tokens) > self.inference.max_input_tokens:
             return {**result, "status": "input_too_long"}
         model = self.load()
         device = model.get_input_embeddings().weight.device
         inputs = torch.tensor([tokens], device=device)
         self._synchronize(device)
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
         started = time.perf_counter()
         thinking = self.inference.mode == InferenceMode.thinking
         text_config = getattr(model.config, "text_config", model.config)
@@ -291,7 +193,6 @@ class NativeLM(ModelSource):
             result.update(metadata)
             if inputs is None:
                 result["seconds"] = time.perf_counter() - started
-                self._log_profile(result)
                 return result
             # Only the stable special-token boundary is needed for label
             # tokenization; generated reasoning IDs and cache remain untouched.
@@ -299,13 +200,7 @@ class NativeLM(ModelSource):
         if limit is not None and inputs.shape[1] + label_reserve > limit:
             return {**result, "status": "context_limit", "seconds": time.perf_counter() - started}
         self._synchronize(device)
-        scoring_started = time.perf_counter()
         result.update(self._score_options(model, inputs, answer_prefix, len(question.options), cache))
         self._synchronize(device)
-        result["scoring_seconds"] = time.perf_counter() - scoring_started
         result["seconds"] = time.perf_counter() - started
-        if device.type == "cuda":
-            result["peak_allocated_gib"] = torch.cuda.max_memory_allocated(device) / 1024**3
-            result["reserved_gib"] = torch.cuda.memory_reserved(device) / 1024**3
-        self._log_profile(result)
         return result
