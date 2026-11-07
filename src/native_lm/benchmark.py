@@ -31,6 +31,8 @@ class BenchmarkConfig:
     repeats: int = 3
     profile: bool = True
     profile_only: bool = False
+    compile_decode: bool = False  # Add a BF16 static-cache/compiled comparison.
+    quantizations: tuple[Quantization, ...] = (Quantization.nf4, Quantization.none)
     profile_tokens: int = 32
     device: str = "cuda:0"
     cache_dir: Path = Path("artifacts/models/hub")
@@ -156,6 +158,10 @@ def _profile(lm, inputs, config, name):
 def benchmark(config: BenchmarkConfig):
     if config.tokens < 2 or config.repeats < 1 or config.profile_tokens < 1:
         raise ValueError("Use at least two tokens and one repeat")
+    if not config.quantizations or len(set(config.quantizations)) != len(config.quantizations):
+        raise ValueError("Choose distinct quantizations")
+    if config.compile_decode and Quantization.none not in config.quantizations:
+        raise ValueError("Compiled decode comparison requires --quantizations none")
     if not torch.cuda.is_available():
         raise RuntimeError("This benchmark requires CUDA")
     report = dict(config=vars(config), torch=torch.__version__, cuda=torch.version.cuda,
@@ -165,7 +171,7 @@ def benchmark(config: BenchmarkConfig):
                   torch_interop_threads=torch.get_num_interop_threads(), modes={})
     config.output.parent.mkdir(parents=True, exist_ok=True)
     reference_ids = None
-    for quantization in (Quantization.nf4, Quantization.none):
+    for quantization in config.quantizations:
         lm = NativeLM(BackboneConfig(config.model_id, revision=config.revision,
                                     quantization=quantization, device=config.device,
                                     cache_dir=config.cache_dir),
@@ -193,13 +199,39 @@ def benchmark(config: BenchmarkConfig):
         model.generation_config.do_sample = False
         runtime = _runtime_info(lm)
         print("Native LM runtime: " + json.dumps(runtime, default=str), flush=True)
-        paths = (False, True) if quantization == Quantization.nf4 else (False,)
-        if config.profile_only:
-            paths = (False,)
-        for project in paths:
+        paths = [(False, False)]
+        if quantization == Quantization.nf4 and not config.profile_only:
+            paths.append((True, False))
+        if quantization == Quantization.none and config.compile_decode:
+            paths.append((False, True))
+        for project, compiled in paths:
             name = f"{quantization}_{'project' if project else 'minimal'}"
+            if compiled:
+                name += "_compiled"
+                from transformers import CompileConfig, StaticCache
+
+                # Fullgraph makes graph breaks explicit instead of reporting a
+                # partially eager run as a successful compiled comparison.
+                model.generation_config.cache_implementation = "static"
+                model.generation_config.compile_config = CompileConfig(
+                    fullgraph=True, dynamic=False, mode="reduce-overhead")
+                model.generation_config.disable_compile = False
+                cache = StaticCache(config=model.config, max_cache_len=len(ids) + config.tokens)
+                if not model._valid_auto_compile_criteria(
+                    {"past_key_values": cache}, model.generation_config
+                ):
+                    raise RuntimeError("This runtime cannot compile Qwen decode with a static cache")
+                del cache
+                print("Compiled BF16 decode: first warmup includes compilation; this may take minutes.", flush=True)
+            else:
+                model.generation_config.cache_implementation = None
+                model.generation_config.compile_config = None
+                model.generation_config.disable_compile = True
             print(f"\n{name}: warmup ({config.tokens} tokens)", flush=True)
             _measure(lm, inputs, config.tokens, project)
+            if compiled:
+                # Give CUDA graph recording its own untimed iteration as well.
+                _measure(lm, inputs, config.tokens, project)
             samples = []
             for i in range(0 if config.profile_only else config.repeats):
                 sample = _measure(lm, inputs, config.tokens, project)
@@ -207,7 +239,8 @@ def benchmark(config: BenchmarkConfig):
                 print(f"  {i + 1}/{config.repeats}: {sample['tokens_per_second']:.2f} tok/s, "
                       f"{sample['seconds']:.3f}s, peak {sample['peak_allocated_gib']:.2f} GiB", flush=True)
             report["modes"][name] = dict(
-                input_tokens=len(ids), runtime=runtime, samples=samples)
+                input_tokens=len(ids), runtime=runtime, samples=samples,
+                execution=dict(compiled=compiled, cache="static" if compiled else "dynamic"))
             if samples:
                 report["modes"][name]["median_tokens_per_second"] = statistics.median(
                     s["tokens_per_second"] for s in samples)

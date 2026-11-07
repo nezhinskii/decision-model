@@ -102,3 +102,24 @@ tables, while `*.trace.json` files contain timelines for Perfetto/Chrome tracing
 The timeline shows CPU dispatch gaps that operator totals alone cannot reveal.
 If CUDA profiling is unavailable (e.g. CUPTI missing), the command explicitly
 warns that the trace contains no CUDA events. Use `--no-profile` for speed only.
+
+
+### Windows: compare compiled BF16 decode
+
+On a 24 GiB GPU, compare BF16 eager decode against full-graph compilation with
+static hybrid cache. This targets the many small CUDA launches visible in the
+diagnostic traces. It is an opt-in benchmark, not a verified production speedup:
+
+```bash
+uv run python -m src.native_lm.benchmark --quantizations none --compile-decode --no-profile --output artifacts/diagnostics/native_generation_compiled.json
+```
+
+The first compiled warmup can take several minutes. Compilation and an additional
+CUDA graph warmup are excluded from the three measured runs. The report retains
+the eager BF16 baseline and adds `none_minimal_compiled`. Full-graph compilation
+fails explicitly on graph breaks; unsupported compilation criteria also raise
+instead of silently benchmarking eager execution. Recent Transformers with
+static linear-attention cache support, working triton-windows and a working
+TorchInductor compiler toolchain are required. The actual CUDA graph capture and
+speedup depend on the runtime and must be checked on the experiment machine.
+This command leaves normal evaluation and its dynamic generation cache unchanged.
