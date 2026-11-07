@@ -261,3 +261,26 @@ def test_noncanonical_reasoning_does_not_require_tokenizer_round_trip(example):
     result = lm.predict(example.context, example.questions[0])
     assert result["status"] == "ok"
     assert result["scores"] == [1, 3]
+
+
+@pytest.mark.parametrize("backend", ["sdpa", "eager"])
+def test_attention_backend_is_plain_string_for_compiled_dispatch(backend):
+    from src.backbone.loading import AttentionBackend, ModelSource
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    source = ModelSource(BackboneConfig(
+        "fake", device="cpu", quantization="none",
+        attention_backend=AttentionBackend(backend)))
+    implementation = source._model_kwargs(SimpleNamespace())["attn_implementation"]
+    assert type(implementation) is str
+
+    def eager_fallback(*args, **kwargs):
+        pass
+
+    def dispatch(x):
+        selected = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_fallback)
+        return x.sin() if selected is eager_fallback else x.cos()
+
+    x = torch.tensor([0.5])
+    compiled = torch.compile(dispatch, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), dispatch(x))

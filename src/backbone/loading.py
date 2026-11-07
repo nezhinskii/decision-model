@@ -107,7 +107,9 @@ class ModelSource:
         kwargs = dict(
             config=config,
             dtype=getattr(torch, settings.dtype),
-            attn_implementation=settings.attention_backend,
+            # Transformers retains this value in config and reads it inside
+            # compiled forward. Dynamo cannot trace StrEnum.startswith.
+            attn_implementation=str(settings.attention_backend),
             device_map={"": settings.device},
             **self._hub_kwargs(),
         )
