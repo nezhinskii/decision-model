@@ -19,6 +19,36 @@ floating-point rounding can differ; bit-identical generated text is not promised
 import importlib
 import inspect
 
+import torch
+
+
+@torch.library.custom_op(
+    "decision_research::causal_conv1d_update", mutates_args=("cache",)
+)
+def _compiled_convolution_update(
+    x: torch.Tensor,
+    cache: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    activation: str | None,
+) -> torch.Tensor:
+    """Opaque FLA call: its dispatcher is compiler-disabled; cache mutates in place.
+
+    Keeping this boundary opaque lets Dynamo capture the surrounding decoder
+    without tracing FLA's Python dispatch. No weights or states are copied.
+    """
+    from fla.modules.causal_conv1d import causal_conv1d_update
+
+    output, _ = causal_conv1d_update(
+        x, cache=cache, weight=weight, bias=bias, activation=activation)
+    return output
+
+
+@_compiled_convolution_update.register_fake
+def _fake_convolution_update(x, cache, weight, bias, activation):
+    # Match FLA's fresh contiguous output; cache keeps its shape/storage.
+    return torch.empty_like(x, memory_format=torch.contiguous_format)
+
 
 def _is_reference(function):
     # Transformers hides its resolved backend in a decorator closure. Patch only
@@ -77,9 +107,13 @@ def install_qwen_convolutions(model):
                 raise RuntimeError("FLA convolution requires contiguous recurrent convolution state")
             # Both APIs store state as [batch, channels, kernel_width]. Pass the
             # SAME buffer: FLA shifts/appends in-place, as Qwen's cache expects.
-            output, _ = causal_conv1d_update(
-                x.transpose(1, 2), cache=conv_state, weight=weight.contiguous(),
-                bias=bias, activation=activation)
+            if torch.compiler.is_compiling():
+                output = _compiled_convolution_update(
+                    x.transpose(1, 2), conv_state, weight.contiguous(), bias, activation)
+            else:
+                output, _ = causal_conv1d_update(
+                    x.transpose(1, 2), cache=conv_state, weight=weight.contiguous(),
+                    bias=bias, activation=activation)
             return output.transpose(1, 2)
         update.kernel_provider = "fla.modules.causal_conv1d.causal_conv1d_update [triton bridge]"
         module.causal_conv1d_update = update

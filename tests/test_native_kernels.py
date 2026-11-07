@@ -73,3 +73,29 @@ def test_reference_detection_preserves_existing_optimized_dispatch():
     assert kernels._is_reference(dispatcher(False))
     assert not kernels._is_reference(dispatcher(True))
     assert not kernels._is_reference(lambda: None)
+
+
+def test_compiled_convolution_captures_disabled_dispatch_and_mutates_cache(monkeypatch):
+    """A disabled FLA dispatcher must remain opaque to fullgraph compilation."""
+    import fla.modules.causal_conv1d as fla
+
+    @torch.compiler.disable
+    def update(x, cache, weight, bias, activation):
+        cache.copy_(torch.cat((cache[..., 1:], x.transpose(1, 2)), dim=-1))
+        output = (cache * weight).sum(-1).unsqueeze(1)
+        if bias is not None:
+            output = output + bias
+        return torch.nn.functional.silu(output), cache
+
+    monkeypatch.setattr(fla, "causal_conv1d_update", update)
+    compiled = torch.compile(kernels._compiled_convolution_update, backend="eager", fullgraph=True)
+    torch.manual_seed(42)
+    cache = torch.randn(1, 8, 4)
+    expected_cache = cache.clone()
+    weight, bias = torch.randn(8, 4), torch.randn(8)
+    for _ in range(3):
+        x = torch.randn(1, 1, 8)
+        expected, _ = update(x, expected_cache, weight, bias, "silu")
+        actual = compiled(x, cache, weight, bias, "silu")
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(cache, expected_cache)

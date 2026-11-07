@@ -123,3 +123,10 @@ static linear-attention cache support, working triton-windows and a working
 TorchInductor compiler toolchain are required. The actual CUDA graph capture and
 speedup depend on the runtime and must be checked on the experiment machine.
 This command leaves normal evaluation and its dynamic generation cache unchanged.
+
+The FLA convolution-update dispatcher is marked `torch.compiler.disable`.
+During compiled decode, our bridge calls it through a registered PyTorch custom
+operation with explicit `cache` mutation and a fake-tensor implementation. Dynamo
+can retain that operation inside a full graph without tracing the dispatcher.
+Eager execution still calls FLA directly. This removes that specific graph break;
+CUDA graph eligibility and GPU performance still require a hardware measurement.
