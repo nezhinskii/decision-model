@@ -22,6 +22,11 @@ def run_evaluation(config: EvaluationConfig, *, kind: str, source_factory):
         raise ValueError("Log interval must be positive")
     root = config.output / config.name
     previous = json.loads((root / "config.json").read_text()) if (root / "config.json").exists() else None
+    # Older native runs predate the execution setting and are unambiguously
+    # eager. Normalize only in memory; never rewrite their recorded config.
+    if previous is not None and kind == "lm" and previous.get("kind") == "lm":
+        old_inference = previous.get("config", {}).get("inference", {})
+        old_inference.setdefault("execution", "eager")
     requested = json.loads(json.dumps(asdict(config), default=str))
     requested.pop("remote_uri")  # A failed remote transfer may be retried elsewhere.
     if previous is not None and (previous.get("config") != requested or previous.get("kind") != kind):

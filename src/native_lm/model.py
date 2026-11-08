@@ -10,6 +10,7 @@ from transformers import AutoModelForCausalLM, StoppingCriteria, StoppingCriteri
 from ..backbone.loading import BackboneConfig, ModelSource
 from .inputs import ANSWER_SUFFIX, build_prompt, candidate_sequences
 from .kernels import install_qwen_convolutions
+from .execution import DecodeExecution, ExecutionMode, execution_description
 
 
 class InferenceMode(StrEnum):
@@ -23,9 +24,13 @@ class NativeLMConfig:
     max_input_tokens: int = 2048
     max_reasoning_tokens: int = 2048
     save_reasoning: bool = False
+    execution: ExecutionMode = ExecutionMode.eager
 
     def __post_init__(self):
         self.mode = InferenceMode(self.mode)
+        self.execution = ExecutionMode(self.execution)
+        if self.execution == ExecutionMode.compiled_decode and self.mode != InferenceMode.thinking:
+            raise ValueError("compiled_decode is for thinking mode; direct scoring uses execution=eager")
         if min(self.max_input_tokens, self.max_reasoning_tokens) < 1:
             raise ValueError("Token budgets must be positive")
 
@@ -46,6 +51,7 @@ class NativeLM(ModelSource):
     def __init__(self, backbone: BackboneConfig, inference: NativeLMConfig):
         super().__init__(backbone)
         self.inference = inference
+        self._execution = None
 
     def load(self):
         if self._model is None:
@@ -79,21 +85,47 @@ class NativeLM(ModelSource):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
-    def _generate_reasoning(self, model, inputs, budget):
+    def describe_execution(self):
+        """Configuration-level provenance; does not load weights or compile."""
+        return execution_description(self.inference.execution)
+
+    def _generate_reasoning(self, model, inputs, budget, cache_capacity=None):
         """Return answer tokens, generation cache and optional reasoning text."""
         tokenizer = self.tokenizer
         closing = tokenizer.encode("</think>", add_special_tokens=False)
         if not closing:
             raise ValueError("Empty reasoning boundary")
         device = inputs.device
-        generated = model.generate(
-            input_ids=inputs, attention_mask=torch.ones_like(inputs),
-            do_sample=False, use_cache=True, max_new_tokens=budget,
-            stopping_criteria=StoppingCriteriaList([StopAtTokens(closing)]),
-            return_dict_in_generate=True, output_scores=False, output_logits=False,
-            pad_token_id=(tokenizer.pad_token_id if tokenizer.pad_token_id is not None
-                          else tokenizer.eos_token_id),
-        )
+        generation = copy.deepcopy(model.generation_config)
+        generation.do_sample = False
+        generation.num_beams = 1
+        generation.num_return_sequences = 1
+        generation.use_cache = True
+        generation.max_new_tokens = budget
+        generation.return_dict_in_generate = True
+        generation.output_scores = False
+        generation.output_logits = False
+        generation.pad_token_id = (tokenizer.pad_token_id if tokenizer.pad_token_id is not None
+                                   else tokenizer.eos_token_id)
+        # Explicit execution policy. Existing global/generation auto-compile
+        # settings must not silently change an eager run or compile scoring.
+        generation.disable_compile = True
+        generation.compile_config = None
+        generation.cache_implementation = None
+        kwargs = dict(input_ids=inputs, attention_mask=torch.ones_like(inputs),
+            generation_config=generation,
+            stopping_criteria=StoppingCriteriaList([StopAtTokens(closing)]))
+        if self.inference.execution == ExecutionMode.compiled_decode:
+            if self._execution is None:
+                self._execution = DecodeExecution(model)
+            if cache_capacity is None:
+                cache_capacity = inputs.shape[1] + budget + len(tokenizer.encode(ANSWER_SUFFIX, add_special_tokens=False))
+            with self._execution.generation(cache_capacity) as cache:
+                generated = model.generate(**kwargs, past_key_values=cache)
+                if generated.past_key_values is not cache:
+                    raise RuntimeError("compiled_decode requires generate() to retain the supplied static cache")
+        else:
+            generated = model.generate(**kwargs)
         sequences = generated.sequences
         reasoning = sequences[0, inputs.shape[1]:].tolist()
         metadata = dict(reasoning_tokens=len(reasoning))
@@ -182,14 +214,22 @@ class NativeLM(ModelSource):
         text_config = getattr(model.config, "text_config", model.config)
         limit = getattr(text_config, "max_position_embeddings", None)
         budget = self.inference.max_reasoning_tokens
+        separator_size = len(self.tokenizer.encode(ANSWER_SUFFIX, add_special_tokens=False))
         if limit is not None:
-            separator_size = len(self.tokenizer.encode(ANSWER_SUFFIX, add_special_tokens=False))
             budget = min(budget, limit - len(tokens) - separator_size - label_reserve)
             if len(tokens) + label_reserve > limit or (thinking and budget < 1):
                 return {**result, "status": "context_limit"}
         answer_prefix, cache = prompt, None
         if thinking:
-            inputs, cache, metadata = self._generate_reasoning(model, inputs, budget)
+            if self.inference.execution == ExecutionMode.compiled_decode:
+                # A stable upper bound across question lengths limits shape
+                # recompilation; grow only if a wider label needs more space.
+                capacity = self.inference.max_input_tokens + self.inference.max_reasoning_tokens + separator_size + label_reserve
+                if limit is not None:
+                    capacity = min(capacity, limit)
+                inputs, cache, metadata = self._generate_reasoning(model, inputs, budget, cache_capacity=capacity)
+            else:
+                inputs, cache, metadata = self._generate_reasoning(model, inputs, budget)
             result.update(metadata)
             if inputs is None:
                 result["seconds"] = time.perf_counter() - started

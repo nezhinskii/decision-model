@@ -71,6 +71,45 @@ Runtime logs identify it explicitly as `[triton bridge]`. Numerical agreement is
 validated within tolerances, rather than requiring bit-identical output.
 
 
+## Execution modes
+
+`--inference.execution eager` is the default. `compiled_decode` is an explicit
+alternative for thinking inference on one CUDA device. Quantization and compute
+dtype remain independent loading settings; NF4/FP16 is the tested fast setup.
+Direct mode uses eager execution and rejects `compiled_decode`, which would not
+accelerate its one-shot answer scoring.
+
+```powershell
+python -m src.evaluation.evaluate_lm --dataset artifacts/data/prepared/research_50_2_2_2048 --name qwen35_nf4_compiled_validation --backbone.model-id Qwen/Qwen3.5-4B --backbone.revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --backbone.quantization nf4 --backbone.dtype float16 --inference.mode thinking --inference.execution compiled_decode
+```
+
+`execution.py` owns the per-model execution controller. It attaches a scoped
+forward router once, explicitly compiling single-token reasoning decode with
+fullgraph/reduce-overhead. HF generate retains its logits processors and natural
+stopping rules. Prefill and answer scoring remain eager; no process-wide compiler
+settings or automatic fallback are used. Explicit routing avoids HF quantizer
+flags silently skipping the requested NF4 compilation.
+
+One static cache is reset and reused between questions. Its capacity covers the
+configured maximum input/reasoning lengths, answer separator and full label
+continuation, capped at the model position limit. It grows only if a larger
+capacity is requested. This bounds shape changes but can allocate more memory
+than a short prompt's dynamic cache. First-call compilation and possible
+recompilation after a capacity change count toward inference latency.
+
+Support is checked through model/cache capabilities, not a checkpoint-name
+allowlist: decoder-only generate, a compileable StaticCache, one CUDA device and
+no CPU/disk offload. Static-cache construction and compiler errors are explicit.
+New models/library versions still need a smoke check; compatible interfaces do
+not establish numerical equivalence. Qwen-specific convolution compatibility
+remains isolated in `kernels.py`. Neither this mode nor its configuration alters
+backbone extraction or decision-head training/evaluation.
+
+Execution mode/scope is recorded in native evaluation provenance, source identity
+and MLflow tags. Resume cannot switch execution mode. Older runs with no execution
+field are treated as eager without rewriting their saved configuration. To compare
+modes, use separate run names and an identical question cohort.
+
 ## Developer diagnostics
 
 Run from the repository root using the project environment. All diagnostic
@@ -138,10 +177,11 @@ ignored research artifacts, not package dependencies.
   not an accuracy benchmark or proof of equivalence on arbitrary inputs.
 - Dynamic-cache compilation and compiled-all paths in that environment required
   unavailable `cl.exe`. Working compiled-decode evidence does not validate them.
-- Diagnostic compiled execution is currently implemented in the tool. Production
-  NativeLM/evaluation retains its existing execution path until separately integrated.
+- Evaluation now exposes the alternative as `--inference.execution compiled_decode`.
+  The shared execution component has offline contract coverage; its current
+  integration should be smoke-checked on the experiment GPU after runtime changes.
 
-The tool temporarily routes forwards and registers benchmark-local FLA boundaries
-for compiled-prefill experiments. Those remain isolated from normal inference.
-When a production execution component is introduced, the tool should reuse it
-and remove the corresponding diagnostic implementation.
+The smoke and validated eager/dynamic or compiled-decode/static integration paths
+call the same `execution.py` component used by evaluation. Experimental cache and
+compiled-prefill/all paths still require diagnostic routing and benchmark-local
+FLA boundaries. Those experiments remain isolated from normal inference.

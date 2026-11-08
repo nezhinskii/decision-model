@@ -81,6 +81,11 @@ def test_native_resume_metrics_local_remote_and_cohort_validation(tmp_path, exam
         evaluate_lm(config)
     root = config.output / config.name
     assert len(PredictionJournal(root / "predictions.jsonl").completed) == 1
+    # Legacy eager config/source predating the execution field must resume.
+    saved = json.loads((root / "config.json").read_text())
+    saved["config"]["inference"].pop("execution")
+    saved["source"].pop("execution")
+    (root / "config.json").write_text(json.dumps(saved))
     assert evaluate_lm(config)["all/accuracy"] == 1
     assert calls.count(example.questions[0].id) == 1
     before = list(calls)
@@ -88,6 +93,8 @@ def test_native_resume_metrics_local_remote_and_cohort_validation(tmp_path, exam
     assert calls == before
     with pytest.raises(ValueError, match="configuration"):
         evaluate_lm(replace(config, inference=replace(config.inference, max_reasoning_tokens=99)))
+    with pytest.raises(ValueError, match="configuration"):
+        evaluate_lm(replace(config, inference=replace(config.inference, mode="thinking", execution="compiled_decode")))
     info = json.loads((root / "tracking.json").read_text())
     local = MlflowClient(tracking_uri=info["local_uri"])
     assert local.get_run(info["local_run_id"]).info.status == "FINISHED"

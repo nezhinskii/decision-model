@@ -39,6 +39,8 @@ class Model(nn.Module):
         super().__init__()
         self.embedding = nn.Embedding(256, 2)
         self.config = SimpleNamespace(max_position_embeddings=8192)
+        from transformers import GenerationConfig
+        self.generation_config = GenerationConfig(eos_token_id=1, pad_token_id=0)
         self.tokenizer = tokenizer
         self.close = close
         self.forward_calls = 0
@@ -51,7 +53,7 @@ class Model(nn.Module):
         tail = torch.tensor([self.tokenizer.encode(text)])
         result = torch.cat((input_ids, tail), dim=1)
         assert bool(stopping_criteria(result, None)[0]) == self.close
-        assert kwargs["use_cache"] and kwargs["return_dict_in_generate"]
+        assert kwargs["generation_config"].use_cache and kwargs["generation_config"].return_dict_in_generate
         return SimpleNamespace(sequences=result, past_key_values=Cache(result[:, :-1]))
 
     def forward(self, input_ids, logits_to_keep, **kwargs):

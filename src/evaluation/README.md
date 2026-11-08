@@ -21,6 +21,17 @@ source-specific arguments. Both commands default to validation; freeze the
 protocol there before running test. Heads use their saved mixed-precision config;
 pass `--cpu` for CPU evaluation. Native LM loading options are under `--backbone`.
 
+For the tested CUDA alternative, add `--inference.execution compiled_decode`
+to a thinking run. For NF4/FP16, explicitly set `--backbone.quantization nf4
+--backbone.dtype float16`. This compiles reasoning decode only; prefill and
+answer scoring stay eager. Direct mode requires the default `eager` execution.
+Static cache includes room for the answer suffix and multi-token labels and is
+reset between questions. Compilation is lazy and included in first-call latency;
+errors stop the run instead of silently switching execution. Execution is saved
+in configuration/provenance and cannot change on resume. Legacy runs without
+that field remain eager. See [native execution details](../native_lm/README.md#execution-modes)
+for capability checks, numerical differences and measured boundaries.
+
 ## Responsibilities
 
 - `evaluate_head.py`: head-specific configuration and command.

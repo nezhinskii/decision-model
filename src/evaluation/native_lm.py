@@ -7,6 +7,7 @@ from ..experiments.provenance import data_summary
 from ..utils.files import file_hash
 from ..native_lm.inputs import PROMPT_VERSION
 from ..native_lm.model import NativeLM
+from ..native_lm.execution import ExecutionMode, execution_description
 from .predictions import prediction
 
 
@@ -29,8 +30,14 @@ class NativeLMSource:
             "split_sha256": file_hash(self.path),
             "prompt_version": PROMPT_VERSION,
         }
-        self.provenance = dict(self.signature)
-        self.tags = {"model_family": "native_lm", "mode": str(config.inference.mode)}
+        execution = execution_description(config.inference.execution)
+        if previous is None or "execution" in previous:
+            self.signature["execution"] = execution
+        elif config.inference.execution != ExecutionMode.eager:
+            raise ValueError("Legacy evaluation runs use eager execution; choose a new run name")
+        self.provenance = dict(self.signature, execution=execution)
+        self.tags = {"model_family": "native_lm", "mode": str(config.inference.mode),
+                     "execution": str(config.inference.execution)}
         self.artifacts = {"data_summary.json": data_summary(config.dataset)}
 
     def batches(self):

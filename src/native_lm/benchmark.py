@@ -40,6 +40,7 @@ from src.backbone.loading import BackboneConfig
 from src.data.schema import Option, Question, Target, TargetKind, Task
 from src.native_lm.inputs import ANSWER_SUFFIX, build_prompt, candidate_sequences
 from src.native_lm.model import NativeLM, NativeLMConfig
+from src.native_lm.execution import ExecutionMode
 
 
 # Benchmark-only opaque boundaries for FLA public dispatchers. Their Python
@@ -449,6 +450,25 @@ def native_predict(runner, config, count, thinking):
     Static generation reserves room for the real answer suffix/label branches.
     """
     lm, model = runner.lm, runner.model
+    production = ((runner.cache_kind == "static" and runner.execution == "compile_decode")
+                  or (runner.cache_kind == "dynamic" and runner.execution == "eager"))
+    if production:
+        # Validated paths call the same execution component as evaluation.
+        # Experimental cache/compile-all paths below remain diagnostic only.
+        original_inference = lm.inference
+        try:
+            mode = (ExecutionMode.compiled_decode if thinking and runner.execution == "compile_decode"
+                    else ExecutionMode.eager)
+            lm.inference = NativeLMConfig(mode="thinking" if thinking else "direct",
+                max_input_tokens=8192, max_reasoning_tokens=config.timing_tokens, execution=mode)
+            result = lm.predict("Water becomes less dense when it freezes. Ice floats on liquid water.", question(count))
+            result["execution"] = lm.describe_execution()
+            result["execution_implementation"] = "src.native_lm.execution"
+            if lm._execution is not None and mode == ExecutionMode.compiled_decode:
+                result["static_cache_capacity"] = lm._execution.capacity
+            return result
+        finally:
+            lm.inference = original_inference
     original_forward, original_generate = model.forward, model.generate
     original_score, original_inference = lm._score_options, lm.inference
     original_generation = copy.deepcopy(model.generation_config)
@@ -663,7 +683,7 @@ def worker(spec):
             passed = (prediction.get("status") == "ok" and prediction.get("reasoning_tokens", 0) > 0
                       and scores is not None and len(scores) == 4 and all(math.isfinite(v) for v in scores))
             result.update(status="complete" if passed else "incomplete", native_smoke=value,
-                          forward_attempts=runner.calls, passed=passed)
+                          execution=value["result"].get("execution"), passed=passed)
             print(f"[native smoke] {'PASS' if passed else 'NOT PASSED'}: status={prediction.get('status')}, reasoning_tokens={prediction.get('reasoning_tokens')}, scores={scores}, seconds={value['seconds']:.2f}", flush=True)
             return
         try:
@@ -968,7 +988,7 @@ def run(config):
 
 
 @torch.inference_mode()
-def self_test():
+def _self_test():
     """All benchmark-specific regression checks live here, not in other files."""
     from transformers import LlamaConfig, LlamaForCausalLM
     class Tokenizer:
@@ -1123,6 +1143,20 @@ def self_test():
         assert all(w["status"] == "error" for w in partial["rows"][0]["workloads"])
         assert any("deliberate" in line for line in report_summary({"results": [partial]}))
     print("SELF-TEST PASS: 6 cache/execution combinations, all pipeline stages, teacher forcing, direct/thinking, multi-token branches, hybrid Qwen cache, corruption detection and worker error isolation.")
+
+
+def self_test():
+    """Exercise production execution on CPU with an explicit test-only backend."""
+    from unittest.mock import patch
+    from . import execution as execution_module
+    real_compile = torch.compile
+    def cpu_compile(function, **kwargs):
+        kwargs.pop("mode", None)
+        kwargs["backend"] = "eager"
+        return real_compile(function, **kwargs)
+    with patch.object(execution_module, "_require_cuda", lambda model: None), \
+         patch.object(execution_module.torch, "compile", cpu_compile):
+        _self_test()
 
 
 if __name__ == "__main__":
