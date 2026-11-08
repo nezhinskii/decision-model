@@ -13,8 +13,8 @@ option criteria are included, while targets are never prompt inputs.
 
 The runner requires a Qwen-style template exposing `<think>`/`</think>` and a
 text decoder supporting `logits_to_keep`. Unsupported templates fail explicitly.
-Qwen3.5 loads its text CausalLM without vision weights. GPU/NF4 memory and throughput
-still need checking on the experiment machine.
+Qwen3.5 loads its text CausalLM without vision weights. The tested runtime and
+its limits are recorded below.
 
 ## Answer position
 
@@ -33,8 +33,9 @@ interrupted v1 run can resume without recomputing its completed answers.
 Direct uses `enable_thinking=False`: the template already provides a closed empty
 reasoning block. Thinking generates until the complete `</think>` token sequence;
 the runner then appends exactly two newlines. Both modes score the next token
-after `</think>\n\n`. No `Answer:` prefix is injected. After reasoning, tokenization
-is checked against the actual generated token sequence before scoring.
+after `</think>\n\n`. No `Answer:` prefix is injected. After reasoning, label tokenization
+is checked at the exact closing boundary in the original token IDs; arbitrary
+generated reasoning is never decoded and re-encoded for scoring.
 
 Candidate vocabulary logits are returned in the original option order. Metrics
 use softmax across valid labels at temperature 1. `label_probability_mass` records
@@ -47,15 +48,8 @@ Multi-token labels share cached prefixes. At branches both attention KV and
 mutable recurrent state are cloned; depth-first traversal bounds retained copies.
 Per-token generation logits are not retained.
 
-Startup logs report actual 4-bit modules, dtype, attention backend and resolved
-hybrid kernel providers, warning when reference PyTorch kernels remain active.
-The first three predictions and every 25th print generation/prefill/decode/scoring
-times and reused-cache/forward token counts. Phase timings, cache counters and CUDA
-memory peaks are saved with predictions and aggregated in evaluation metrics.
-Decode throughput excludes the first prefill forward; generation throughput includes
-it. Old resumed predictions remain valid but do not enter the new phase rates;
-`evaluation/profiled_questions` identifies their coverage. Use a new run name for
-an entirely fresh speed measurement.
+Runtime diagnostics and benchmarks live in
+[`benchmark.py`](benchmark.py).
 
 Reasoning text is saved only with `--inference.save-reasoning`; this text then
 becomes part of the prediction artifact uploaded to MLflow. Timing includes
@@ -75,3 +69,79 @@ and argument conventions, retaining the same mutable convolution-state buffer.
 Its module-level scope and removal conditions are documented in the code.
 Runtime logs identify it explicitly as `[triton bridge]`. Numerical agreement is
 validated within tolerances, rather than requiring bit-identical output.
+
+
+## Developer diagnostics
+
+Run from the repository root using the project environment. All diagnostic
+logic and offline self-checks live in `benchmark.py`, alongside the native LM
+implementation. The default is **one real thinking-to-score smoke call**:
+
+```powershell
+python -m src.native_lm.benchmark
+```
+
+Default smoke settings: NF4, FP16 compute, static cache, compiled decode,
+four options and a 2048-token reasoning budget. Success requires natural
+reasoning termination and four finite scores from the original NativeLM scorer.
+A reasoning limit is a failed smoke, not a successful scoring check. Weight
+loading/first compilation contribute to this call's latency; it is not a warmed
+speed measurement. Output: `artifacts/diagnostics/native_smoke.json`.
+Use `--weights bf16` (or another single weight mode), `--model-id`, `--revision`,
+`--smoke-tokens` and `--output` for deliberate checkpoint-specific checks.
+
+The expensive full matrix requires an explicit flag:
+
+```powershell
+python -m src.native_lm.benchmark --full
+```
+
+It tests none/NF4 quantization with BF16/FP16/FP32 compute, plus native-vs-torch
+reference FP32; dynamic/static cache; eager, compiled decode and compiled all
+forwards. Checks cover prefill, identical teacher histories, per-layer cache,
+logits/probabilities, original 4/54-label scoring, direct/thinking pipelines and
+NativeLM.predict/HF generate integration. Fixed-work reasoning is labeled
+separately from natural stopping. Fullgraph errors/OOM/unsupported combinations
+are retained while independent cases continue. Missing `cl.exe` marks only the
+affected compilation path unsupported; the tool does not configure MSVC or alter
+the Windows build environment. Optional `--profile` adds operator tables.
+Output: `artifacts/diagnostics/native_benchmark.json`, including its summary.
+Temporary baselines are removed on exit. No tensor sidecars or separate summary
+files are retained. Full runs can take hours; they are intended for new runtime
+versions/checkpoints, not routine experiment execution. Selectors `--weights`,
+`--caches`, `--executions` narrow explicit full runs.
+
+Offline checks of the tool itself, including CPU fullgraph routing, hybrid Qwen
+cache, multi-token scoring and error isolation:
+
+```powershell
+python -m src.native_lm.benchmark --self-test
+```
+
+### Validated configuration and limits
+
+Local reference artifacts: `artifacts/diagnostics/native_benchmark.json` (matrix
+snapshot) and `native_smoke.json` (completed real inference call). These are
+ignored research artifacts, not package dependencies.
+
+- Checkpoint: `Qwen/Qwen3.5-4B`, commit
+  `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`.
+- Windows, RTX 3090, PyTorch `2.11.0+cu128`, Transformers `5.20.1`,
+  FLA `0.6.0`, triton-windows `3.6.0.post26`, bitsandbytes `0.50.2`.
+- NF4/FP16 + static cache + compiled decode: approximately 99 tokens/s in the
+  warmed fixed-work pipeline. This is a 4B measurement, not a prediction for 27B.
+- Real smoke: 483 reasoning tokens, natural closure, then four finite scores;
+  3.27 GiB peak allocation. Its 104-second first call included possible compilation.
+- Numerical equivalence is approximate. The NF4/FP16 matrix changed one of 384
+  teacher-forced next-token decisions; six tested answer decisions matched, with
+  answer-distribution TV up to about 0.33%. These are synthetic consistency checks,
+  not an accuracy benchmark or proof of equivalence on arbitrary inputs.
+- Dynamic-cache compilation and compiled-all paths in that environment required
+  unavailable `cl.exe`. Working compiled-decode evidence does not validate them.
+- Diagnostic compiled execution is currently implemented in the tool. Production
+  NativeLM/evaluation retains its existing execution path until separately integrated.
+
+The tool temporarily routes forwards and registers benchmark-local FLA boundaries
+for compiled-prefill experiments. Those remain isolated from normal inference.
+When a production execution component is introduced, the tool should reuse it
+and remove the corresponding diagnostic implementation.

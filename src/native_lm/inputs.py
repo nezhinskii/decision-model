@@ -32,10 +32,17 @@ def render_question(context, question):
 
 
 def candidate_sequences(tokenizer, prefix, count, prefix_ids=None):
-    """Tokenize complete candidate labels, checking the answer boundary."""
+    """Tokenize labels at the answer boundary without re-encoding generated text."""
+    if prefix_ids is not None:
+        # Generated token sequences need not survive decode -> encode unchanged.
+        # The special </think> boundary isolates label tokenization from arbitrary
+        # reasoning. Verify that exact boundary in the ORIGINAL IDs instead of
+        # requiring the entire generated reasoning to have a canonical encoding.
+        prefix = "</think>" + ANSWER_SUFFIX
+        boundary = tokenizer.encode(prefix, add_special_tokens=False)
+        if not boundary or prefix_ids[-len(boundary):] != boundary:
+            raise ValueError("Answer token prefix does not end with the expected boundary")
     before = tokenizer.encode(prefix, add_special_tokens=False)
-    if prefix_ids is not None and before != prefix_ids:
-        raise ValueError("Answer prefix does not round-trip through tokenizer")
     sequences = []
     for label in option_labels(count):
         after = tokenizer.encode(prefix + label, add_special_tokens=False)

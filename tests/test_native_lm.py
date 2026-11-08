@@ -85,8 +85,6 @@ def test_scores_address_original_options_and_reasoning_boundary(example, mode):
     assert result["reasoning_tokens"] > 0 if mode == "thinking" else result["reasoning_tokens"] == 0
     assert "reasoning" not in result
     if mode == "thinking":
-        assert result["cache_reused_tokens"] > result["input_tokens"]
-        assert result["scoring_forward_tokens"] == 3
         assert lm._model.last_forward_tokens == 3
 
 
@@ -119,7 +117,7 @@ def test_prompt_omits_targets_and_contains_criteria(example):
 def test_bad_continuation_tokenization_fails():
     tokenizer = Tokenizer()
     assert candidate_sequences(tokenizer, "prefix\n\n", 2) == [(65,), (66,)]
-    with pytest.raises(ValueError, match="round-trip"):
+    with pytest.raises(ValueError, match="expected boundary"):
         candidate_sequences(tokenizer, "prefix", 2, [1])
     tokenizer.encode = lambda text, **kwargs: [0] if text.endswith("A") else [0, 1]
     with pytest.raises(ValueError, match="continuation"):
@@ -189,7 +187,6 @@ def test_large_candidate_set_uses_complete_sequence_probabilities():
                 for label in option_labels(54)]
     torch.testing.assert_close(torch.tensor(result["scores"]), torch.tensor(expected))
     assert int(torch.tensor(result["scores"]).argmax()) == 53
-    assert result["scoring_forward_tokens"] == len(prefix) + 6
     assert lm._model.forward_calls == 7  # Root plus six distinct first digits.
     assert result["label_probability_mass"] == pytest.approx(float(torch.tensor(expected).exp().sum()))
 
@@ -226,7 +223,6 @@ def test_hybrid_cache_branches_match_full_prefix_scoring(monkeypatch):
     cached = model(inputs[:, :-3], use_cache=True).past_key_values
     reused = lm._score_options(model, inputs, prefix, 54, cached)
     torch.testing.assert_close(torch.tensor(reused["scores"]), torch.stack(expected), atol=2e-5, rtol=2e-5)
-    assert reused["scoring_forward_tokens"] == 3 + 6
 
     original_generate = model.generate
     forced = lm.tokenizer.encode("x</think>")
@@ -240,14 +236,51 @@ def test_hybrid_cache_branches_match_full_prefix_scoring(monkeypatch):
     full = lm._score_options(model, answer, answer_prefix, 54)
     torch.testing.assert_close(torch.tensor(reused["scores"]), torch.tensor(full["scores"]),
                                atol=2e-5, rtol=2e-5)
-    assert reused["cache_reused_tokens"] == answer.shape[1] - 3
-    assert reused["scoring_forward_tokens"] == 3 + 6
     assert timing["reasoning_tokens"] == len(forced)
-    assert timing["prefill_seconds"] > 0
 
 
-def test_requested_nf4_must_actually_be_loaded():
+def test_requested_nf4_must_actually_be_loaded(monkeypatch):
+    from src.native_lm.model import AutoModelForCausalLM
     lm = wrapper()
+    model = lm._model
+    lm._model = None
     lm.config.quantization = "nf4"
+    monkeypatch.setattr(lm, "_load_config", lambda: SimpleNamespace(model_type="fake"))
+    monkeypatch.setattr(lm, "_model_kwargs", lambda config: {})
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", lambda *args, **kwargs: model)
     with pytest.raises(RuntimeError, match="no 4-bit"):
         lm.load()
+
+
+def test_noncanonical_reasoning_does_not_require_tokenizer_round_trip(example):
+    lm = wrapper("thinking")
+    decode = lm.tokenizer.decode
+    # The original generated token IDs still contain "evidence". Decoding them
+    # has a different canonical spelling, as can happen with real tokenizers.
+    lm.tokenizer.decode = lambda ids, **kwargs: decode(ids, **kwargs).replace("evidence", "canonical")
+    result = lm.predict(example.context, example.questions[0])
+    assert result["status"] == "ok"
+    assert result["scores"] == [1, 3]
+
+
+@pytest.mark.parametrize("backend", ["sdpa", "eager"])
+def test_attention_backend_is_plain_string_for_compiled_dispatch(backend):
+    from src.backbone.loading import AttentionBackend, ModelSource
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    source = ModelSource(BackboneConfig(
+        "fake", device="cpu", quantization="none",
+        attention_backend=AttentionBackend(backend)))
+    implementation = source._model_kwargs(SimpleNamespace())["attn_implementation"]
+    assert type(implementation) is str
+
+    def eager_fallback(*args, **kwargs):
+        pass
+
+    def dispatch(x):
+        selected = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_fallback)
+        return x.sin() if selected is eager_fallback else x.cos()
+
+    x = torch.tensor([0.5])
+    compiled = torch.compile(dispatch, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), dispatch(x))

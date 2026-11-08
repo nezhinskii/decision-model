@@ -110,7 +110,6 @@ class PredictionSummary:
         self.counts, self.successes, self.correct, self.random = Counter(), Counter(), Counter(), Counter()
         self.histogram, self.statuses = Counter(), Counter()
         self.seconds = self.reasoning = 0
-        self.profile = Counter()
         for row in rows:
             self.add(row)
 
@@ -120,16 +119,6 @@ class PredictionSummary:
         self.statuses[row["status"]] += 1
         self.seconds += row.get("seconds", 0)
         self.reasoning += row.get("reasoning_tokens", 0)
-        # Old resumed rows must not inflate rates with tokens lacking timings.
-        if "generation_seconds" in row and "seconds" in row:
-            self.profile["profiled_questions"] += 1
-            for key in ("generation_seconds", "prefill_seconds", "decode_seconds",
-                        "scoring_seconds", "decode_tokens", "scoring_forward_tokens",
-                        "scoring_forwards", "cache_reused_tokens", "cache_branch_copies"):
-                self.profile[key] += row.get(key, 0)
-            self.profile["generation_tokens"] += row.get("reasoning_tokens", 0)
-            for key in ("peak_allocated_gib", "reserved_gib"):
-                self.profile[key] = max(self.profile[key], row.get(key, 0))
         groups = ("all", f"category/{row['category']}", f"target/{row['target_kind']}")
         for group in groups:
             self.counts[group] += 1
@@ -161,12 +150,6 @@ class PredictionSummary:
         if self.seconds > 0:
             metrics["evaluation/questions_per_second"] = self.counts["all"] / self.seconds
             metrics["evaluation/reasoning_tokens_per_second"] = self.reasoning / self.seconds
-        if self.profile:
-            metrics.update({f"evaluation/{key}": value for key, value in self.profile.items()})
-            for phase in ("generation", "decode"):
-                seconds = self.profile[f"{phase}_seconds"]
-                if seconds > 0:
-                    metrics[f"evaluation/{phase}_tokens_per_second"] = self.profile[f"{phase}_tokens"] / seconds
         return dict(metrics=metrics, option_counts=dict(sorted(self.histogram.items())),
                     statuses=dict(self.statuses),
                     metric_scope="Accuracy includes failures as incorrect; CE/Brier use successful questions only.")
