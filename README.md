@@ -67,6 +67,7 @@ src/
   backbone/              # packed inputs, decoder loading/forward, frozen facade and pooling
   features/              # feature schemas, cache storage/loading and preparation
   heads/                 # projections, processors, Pointer scoring and weight exports
+  models/                # live decoder + head, LoRA/QLoRA and joint weight bundles
   native_lm/             # pretrained LM-head inference and answer prompts
   evaluation/            # head/LM evaluation commands and shared metrics
   experiments/           # shared MLflow tracking, export and provenance
@@ -81,6 +82,7 @@ uv.lock
 
 See [the head guide](src/heads/README.md) for processors, ablations and cache usage.
 Training and resume are described in [the training guide](src/training/README.md).
+Live LoRA/QLoRA training and evaluation are described in [the model guide](src/models/README.md).
 The [evaluation guide](src/evaluation/README.md) covers both cached heads and native
 LMs; [experiments](src/experiments/README.md) covers shared MLflow sync and exports.
 See [the backbone guide](src/backbone/README.md) for input conventions and lazy

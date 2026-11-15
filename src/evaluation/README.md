@@ -120,3 +120,15 @@ exceed its input budget, which is reported through coverage and failure counts.
 Native prompts and reasoning details are documented in
 [native LM](../native_lm/README.md). A native-inference comparison changes input
 formatting as well as the output head, so it does not isolate only the projection.
+
+
+## Live decision models (LoRA / QLoRA)
+
+`python -m src.evaluation.evaluate_decision --run artifacts/runs/RUN --name EVAL`
+reloads the saved base checkpoint, adapters and head and evaluates prepared texts.
+The saved dataset is the default; select another prepared dataset with `--dataset`.
+Use `--device cuda:0` (default) or CPU only for unquantized saved models.
+The same run lifecycle, prediction journal, reference cohort and metrics are reused.
+Over-budget contexts are recorded as context_limit for every affected question,
+not dropped from coverage/accuracy. This command does not read a feature cache.
+See [model documentation](../models/README.md) for complete training/evaluation examples.

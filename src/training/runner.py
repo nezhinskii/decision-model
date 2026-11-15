@@ -39,6 +39,7 @@ class TrainingSetup:
     updates_per_epoch: int
     save_best: Callable[[Path, torch.nn.Module], Path]
     model_state: ModelState = field(default_factory=FullModelState)
+    device_placement: bool = True
     artifacts: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
     tags: dict = field(default_factory=dict)
@@ -105,7 +106,12 @@ def run_training(config: TrainingConfig, prepare: Callable) -> Path:
         if config.schedule == ScheduleType.cosine
         else None
     )
-    model, optimizer = accelerator.prepare(model, optimizer)
+    if setup.device_placement:
+        model, optimizer = accelerator.prepare(model, optimizer)
+    else:
+        # Live decoders (including NF4) are already placed by their loader.
+        model = accelerator.prepare_model(model, device_placement=False)
+        optimizer = accelerator.prepare_optimizer(optimizer)
     config.tracking_db.parent.mkdir(parents=True, exist_ok=True)
     tracker = Tracker(
         root,
@@ -240,6 +246,7 @@ def run_training(config: TrainingConfig, prepare: Callable) -> Path:
                 metrics.update(
                     {
                         "train/learning_rate": used_lr,
+                        **used_group_lrs,
                         "train/step_seconds": elapsed / interval_steps,
                         "train/questions_per_second": interval_questions / elapsed,
                     }
@@ -263,6 +270,10 @@ def run_training(config: TrainingConfig, prepare: Callable) -> Path:
                     ):
                         break
                     used_lr = optimizer.param_groups[0]["lr"]
+                    used_group_lrs = {
+                        f"train/{group['name']}_learning_rate": group["lr"]
+                        for group in optimizer.param_groups if "name" in group
+                    }
                     sums, questions = train_step(
                         model,
                         batches,

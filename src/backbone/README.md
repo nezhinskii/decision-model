@@ -9,6 +9,8 @@
   selected-layer extraction. It preserves the caller's train/eval mode and removes hooks after each forward.
 - `frozen.py`: lazy `FrozenBackbone` facade; freezes the decoder, selects eval mode and
   runs the shared extraction under `no_grad`. No LM output head is loaded.
+- `lora.py`: PEFT adapter configuration and k-bit training preparation.
+- `dataset.py`: temporary disk shards of tokens and supervised batches for live training.
 - `pooling.py`: last/mean pooling into flat question and option tensors, plus
   optional final-layer context memory.
 
@@ -39,8 +41,8 @@ Independent branches remain limited to Qwen3/Llama full-attention layouts;
 Qwen3.5's recurrent state cannot be isolated by a 4D attention mask.
 Kernel selection is left to the installed model libraries. The native-inference
 convolution bridge is not installed by this loader and has not been extended to training.
-LoRA training is not implemented yet; the shared forward/pooling path preserves autograd
-for its later integration. Native LM-head evaluation lives in
+Live LoRA/QLoRA training uses the shared forward/pooling path with autograd; see
+[complete decision models](../models/README.md). Native LM-head evaluation lives in
 [`src/evaluation`](../evaluation/README.md), using the separate native LM wrapper. Pooled feature-cache
 preparation and loading are described in [../features/README.md](../features/README.md).
 
@@ -68,7 +70,8 @@ compares that Python integer with the model limit without reducing a device tens
 Treat packed inputs as immutable: rebuild the batch (or use dataclasses.replace) when
 changing positions. GPU positions at construction are rejected, rather than synchronized.
 Batch-specific masks/transfers remain in execution. Hooks are removed even when the
-decoder raises. Gradient-checkpointed training remains a separate integration to validate.
+decoder raises. Live training uses non-reentrant gradient checkpointing; its real NF4/hybrid GPU
+backward still requires a user-run smoke test on the intended environment.
 
 ## Input settings
 

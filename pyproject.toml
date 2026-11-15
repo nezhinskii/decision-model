@@ -13,6 +13,7 @@ dependencies = [
     "transformers>=4.51,<6",
     "accelerate>=1.15.0",
     "bitsandbytes>=0.50.2",
+    "peft>=0.18,<1",
     "safetensors>=0.8.0",
     "tqdm>=4.67,<5",
     "flash-linear-attention[cuda]>=0.6.0; sys_platform == 'linux'",

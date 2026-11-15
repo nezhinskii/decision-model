@@ -1,5 +1,6 @@
 # Head training
 
+- `train_decision.py`: live prepared-text training of backbone adapters and a head.
 - `train_head.py`: cached-head CLI and task assembly: cache validation, loaders,
   head/optimizer construction, source artifacts and provenance.
 - `config.py`: common training/run options. `TrainConfig` adds cache/head fields;
@@ -34,7 +35,15 @@ run configuration/provenance; a partial-state codec does not serialize the base.
 The existing head exporter remains responsible for best.safetensors; the runner owns
 best.json and invokes the assembler's exporter only when validation CE improves.
 
-This is preparatory separation: there is no LoRA trainer or new live-model CLI yet.
+`train_decision.py` assembles the live Transformers/PEFT path and uses the same runner.
+It tokenizes prepared text examples once, trains adapters and a configurable head,
+and supplies an adapter/head-only model-state codec. QLoRA (NF4) is the backbone
+loading default; ordinary LoRA uses quantization=none. See [live models](../models/README.md)
+for commands, source checks, gradient checkpointing, data rejection and evaluation.
+`learning-rate` controls the head; live training adds `adapter-learning-rate`.
+Both named optimizer groups are logged alongside the legacy first-group learning rate.
+Live models are already placed by their loader; the runner avoids moving the quantized
+decoder again while retaining Accelerate mixed precision and optimizer integration.
 
 ## Train
 
