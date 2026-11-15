@@ -1,6 +1,5 @@
 """Training objectives checked against an independent per-question reference."""
 from dataclasses import replace
-from types import SimpleNamespace
 import pytest
 import torch
 
@@ -30,11 +29,9 @@ def test_disabled_loss_branch_is_not_visited_in_backward(monkeypatch, weights, e
 
     monkeypatch.setattr(objectives, 'cross_entropy', instrument(objectives.cross_entropy, 'ce'))
     monkeypatch.setattr(objectives, 'brier_score', instrument(objectives.brier_score, 'brier'))
-    batch = SimpleNamespace(targets=torch.tensor([1., 0.]),
-                            features=SimpleNamespace(option_to_question=torch.tensor([0, 0]),
-                                                     questions=torch.empty(1, 1, 1)))
+    targets = torch.tensor([1., 0.])
     logits = torch.tensor([.1, .2], requires_grad=True)
-    values = training_values(logits, batch, LossConfig(*weights))
+    values = training_values(logits, targets, torch.tensor([0, 0]), 1, ['hard'], LossConfig(*weights))
     values.objective.sum().backward()
     assert visited == graphs == expected
     assert not values.metrics.requires_grad
@@ -48,19 +45,18 @@ def test_disabled_loss_branch_is_not_visited_in_backward(monkeypatch, weights, e
 def test_objective_values_gradients_and_original_metrics(weights, scope, epsilon):
     links = torch.tensor([0, 0, 1, 1, 1, 2])
     targets = torch.tensor([1., 0., .2, .3, .5, 1.])
-    batch = SimpleNamespace(targets=targets, target_kinds=['hard', 'soft', 'hard'],
-                            features=SimpleNamespace(option_to_question=links, questions=torch.empty(3, 1, 1)))
+    target_kinds = ['hard', 'soft', 'hard']
     logits = torch.tensor([.3, -.2, -1., 2., .5, .4], requires_grad=True)
     config = LossConfig(*weights, epsilon, scope)
     before = targets.clone()
-    actual = training_values(logits, batch, config)
+    actual = training_values(logits, targets, links, 3, target_kinds, config)
     references = []
     for q in range(3):
         selected = links == q
         log_probs = logits[selected].log_softmax(0)
         original = targets[selected]
         smoothed = ((1 - epsilon) * original + epsilon / len(original)
-                    if batch.target_kinds[q] == 'hard' else original)
+                    if target_kinds[q] == 'hard' else original)
         ce = -(smoothed * log_probs).sum()
         brier = (log_probs.exp() - (smoothed if scope == 'both' else original)).square().sum()
         references.append(torch.stack((weights[0] * ce + weights[1] * brier, ce, brier)))

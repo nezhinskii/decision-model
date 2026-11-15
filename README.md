@@ -64,13 +64,13 @@ and a cache-loading example.
 ```text
 src/
   data/                  # common schema, source adapter, sampling and preparation
-  backbone/              # packed inputs, lazy frozen loading and feature pooling
+  backbone/              # packed inputs, decoder loading/forward, frozen facade and pooling
   features/              # feature schemas, cache storage/loading and preparation
   heads/                 # projections, processors, Pointer scoring and weight exports
   native_lm/             # pretrained LM-head inference and answer prompts
   evaluation/            # head/LM evaluation commands and shared metrics
   experiments/           # shared MLflow tracking, export and provenance
-  training/              # head optimization, validation and resume
+  training/              # task assembly, shared training lifecycle, objectives and resume
   utils/files.py         # shared atomic JSON and streaming checksums
 notebooks/
   backbone.ipynb          # offline mask/shape checks; optional pretrained usage

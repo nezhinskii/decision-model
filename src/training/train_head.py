@@ -1,114 +1,28 @@
-"""Train a head using a completed feature cache; no backbone is instantiated."""
+"""Assemble cached-head training; the shared runner owns the run lifecycle."""
 
-from dataclasses import asdict, dataclass, field
-from itertools import islice
-import json
+from dataclasses import dataclass, field
+from math import ceil
 from pathlib import Path
-import time
-from enum import StrEnum
 
-from accelerate import Accelerator
-from accelerate.utils import set_seed
-from pydantic import TypeAdapter
 import torch
-from tqdm.auto import tqdm
 import tyro
 
 from ..features.cache import make_loader
 from ..heads import HeadConfig, build_head
-from .checkpoints import load_latest, save_latest
 from ..heads.checkpoints import save_model
-from ..utils.files import file_hash, write_json
-from .loop import validate, train_step
-from ..experiments.tracking import Tracker, BackgroundSync
-from ..experiments.provenance import cache_summary, data_summary, check_cache, environment_info
-from .schedules import ScheduleType, CosineSchedule
-from .objectives import LossConfig, TRAIN_METRIC_NAMES
-from .early_stopping import EarlyStoppingConfig, EarlyStopping
-from math import ceil
-
-
-class MixedPrecision(StrEnum):
-    no = "no"
-    bf16 = "bf16"
-    fp16 = "fp16"
+from ..experiments.provenance import cache_summary, data_summary, check_cache
+from .config import TrainingConfig, MixedPrecision
+from .runner import TrainingSetup, run_training
 
 
 @dataclass
-class TrainConfig:
+class TrainConfig(TrainingConfig):
     cache: Path
-    name: str
     head: HeadConfig = field(default_factory=HeadConfig)
-    loss: LossConfig = field(default_factory=LossConfig)
-    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
-    output: Path = Path("artifacts/runs")
-    tracking_db: Path = Path("artifacts/mlflow/tracking.db")
-    experiment: str = "decision-heads"
-    remote_uri: str | None = None
-    epochs: int = 5
-    batch_size: int = 16
-    accumulation_steps: int = 1
-    learning_rate: float = 1e-4
-    schedule: ScheduleType = ScheduleType.constant
-    min_lr_ratio: float = 0.1
-    schedule_steps: int | None = None  # None uses all requested epochs, not max_steps.
-    weight_decay: float = 0.01
-    clip_grad: float = 1.0
-    seed: int = 42
-    cpu: bool = False
-    mixed_precision: MixedPrecision = MixedPrecision.bf16
-    # Intervals count optimizer updates, including gradient accumulation.
-    log_every: int = 25
-    validate_every: int = 500
-    save_every: int = 500
-    resume: bool = True
-    max_steps: int | None = None
 
 
-def train(config: TrainConfig):
-    if (
-        min(
-            config.epochs,
-            config.batch_size,
-            config.accumulation_steps,
-            config.validate_every,
-            config.save_every,
-            config.log_every,
-        )
-        < 1
-    ):
-        raise ValueError("Epochs, batch sizes and intervals must be positive")
-    if Path(config.name).name != config.name or config.name in (".", ".."):
-        raise ValueError("Run name must be one directory name")
-    root = config.output / config.name
-    if root.exists() and not config.resume:
-        raise ValueError("Run exists; use --resume or a new --name")
-    resuming = (root / "latest.pt").exists() and config.resume
-    if root.exists() and any(root.iterdir()) and not resuming:
-        raise ValueError(
-            "Run directory has files but no resumable latest.pt; use a new name"
-        )
-    root.mkdir(parents=True, exist_ok=True)
-    config_path = root / "config.json"
-    if resuming:
-        old = TypeAdapter(TrainConfig).validate_json(config_path.read_text())
-        ignored = {
-            "resume",
-            "epochs",
-            "max_steps",
-            "remote_uri",
-            "save_every",
-            "validate_every",
-            "log_every",
-        }
-        if {k: v for k, v in asdict(old).items() if k not in ignored} != {
-            k: v for k, v in asdict(config).items() if k not in ignored
-        }:
-            raise ValueError("Resume configuration changed the model/data/optimizer")
-    accelerator = Accelerator(cpu=config.cpu, mixed_precision=config.mixed_precision)
-    if accelerator.num_processes != 1:
-        raise ValueError("This initial training loop supports one process only")
-    set_seed(config.seed)
+def prepare_head(config, accelerator, root, resuming):
+    """Resolve cache, construct head/optimizer and describe this specific task."""
     context = config.head.requires_context
     train_loader = make_loader(
         config.cache, "train", context, config.batch_size, config.seed, True
@@ -116,9 +30,9 @@ def train(config: TrainConfig):
     val_loader = make_loader(
         config.cache, "validation", context, config.batch_size, config.seed
     )
-    # Reject an incompatible cache before reopening the tracking run as RUNNING.
+    manifest = train_loader.dataset.manifest
     if resuming:
-        check_cache(root, train_loader.dataset.manifest)
+        check_cache(root, manifest)
     first = next(iter(train_loader))
     dimensions = {
         "input_dim": first.features.questions.shape[-1],
@@ -127,211 +41,42 @@ def train(config: TrainConfig):
     del first
     model = build_head(config=config.head, **dimensions)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+        model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
     )
-    updates_per_epoch = ceil(ceil(train_loader.dataset.info['contexts'] / config.batch_size)
-                             / config.accumulation_steps)
-    total_schedule_steps = config.schedule_steps or updates_per_epoch * config.epochs
-    if config.schedule_steps is not None and config.schedule_steps < 1:
-        raise ValueError('schedule_steps must be positive')
-    scheduler = (CosineSchedule(optimizer, total_schedule_steps, config.min_lr_ratio)
-                 if config.schedule == ScheduleType.cosine else None)
-    model, optimizer = accelerator.prepare(model, optimizer)
-    config.tracking_db.parent.mkdir(parents=True, exist_ok=True)
-    tracker = Tracker(
-        root,
-        f"sqlite:///{config.tracking_db.resolve()}",
-        config.experiment,
-        {
-            "mlflow.runName": config.name,
-            "task": "train",
-            "processor": str(config.head.processor),
-        },
+    artifacts = {"cache_summary.json": cache_summary(config.cache, manifest)}
+    prepared = manifest.get("config", {}).get("dataset")
+    if prepared and (Path(prepared) / "manifest.json").exists():
+        artifacts["data_summary.json"] = data_summary(Path(prepared))
+    updates = ceil(
+        ceil(train_loader.dataset.info["contexts"] / config.batch_size)
+        / config.accumulation_steps
     )
-    if not resuming:
-        write_json(config_path, asdict(config))
-        write_json(
-            root / "cache_summary.json",
-            cache_summary(config.cache, train_loader.dataset.manifest),
-        )
-        prepared_path = train_loader.dataset.manifest.get("config", {}).get("dataset")
-        if prepared_path and (Path(prepared_path) / "manifest.json").exists():
-            write_json(
-                root / "data_summary.json",
-                data_summary(Path(prepared_path)),
-            )
-
-        write_json(root / "provenance.json", {
-            **environment_info(), **dimensions,
+    return TrainingSetup(
+        model=model,
+        optimizer=optimizer,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        updates_per_epoch=updates,
+        save_best=save_model,
+        artifacts=artifacts,
+        provenance={
+            **dimensions,
             "cache": str(config.cache.resolve()),
             "parameters": sum(p.numel() for p in model.parameters()),
-            "device": str(accelerator.device),
-            "learning_rate_schedule": str(config.schedule),
-            "schedule_steps": total_schedule_steps if scheduler is not None else None,
-        })
-    for name in ("config.json", "cache_summary.json", "provenance.json"):
-        if not (root / name).exists():
-            continue
-        tracker.artifact(root / name)
-    if (root / "data_summary.json").exists():
-        tracker.artifact(root / "data_summary.json")
-    progress = {"epoch": 0, "batch": 0, "step": 0, "best_loss": float("inf")}
-    if resuming:
-        progress = load_latest(root / "latest.pt", model, optimizer, accelerator, scheduler)
-        write_json(root / "resume_config.json", asdict(config))
-        tracker.artifact(root / "resume_config.json")
-        # A best export may be newer than the last periodic training snapshot.
-        # Keep it rather than replacing it with a worse post-resume validation.
-        if (root / "best.json").exists():
-            best = json.loads((root / "best.json").read_text())
-            progress["best_loss"] = min(
-                progress["best_loss"], best["metrics"]["all/loss"]
-            )
-    else:
-        save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
-    model.train()
-    stopper = EarlyStopping(config.early_stopping, progress.get('early_stopping'))
-    progress['early_stopping'] = stopper.state
-    sender = BackgroundSync(root, config.remote_uri)
+        },
+        tags={"processor": str(config.head.processor)},
+    )
 
-    def record_validation():
-        if progress['step'] <= stopper.state['last_step']:
-            return
-        metrics = validate(model, val_loader, accelerator)
-        tracker.log(
-            {f"validation/{k}": v for k, v in metrics.items()}, progress["step"]
-        )
-        stopper.update(metrics['all/loss'], progress['step'])
-        tracker.log({'early_stopping/bad_checks': stopper.state['bad_checks'],
-                     'early_stopping/stopped': int(stopper.stopped)}, progress['step'])
-        if metrics["all/loss"] < progress["best_loss"]:
-            progress["best_loss"] = metrics["all/loss"]
-            old = (
-                json.loads((root / "best.json").read_text())
-                if (root / "best.json").exists()
-                else None
-            )
-            weights = save_model(root / "checkpoints", accelerator.unwrap_model(model))
-            write_json(
-                root / "best.json",
-                {
-                    "weights": str(weights.relative_to(root)),
-                    "sha256": file_hash(weights),
-                    "step": progress["step"],
-                    "metrics": metrics,
-                },
-            )
-            tracker.artifact(root / "best.json")
-            # Remove a previous UUID-named export from older runs, but keep the
-            # fixed best.safetensors path that has just been replaced.
-            if old and root / old["weights"] != weights:
-                (root / old["weights"]).unlink(missing_ok=True)
-        sender.request()
 
-    try:
-        for epoch in range(progress["epoch"], config.epochs):
-            if stopper.stopped:
-                break
-            train_loader.dataset.set_epoch(epoch)
-            iterator = iter(train_loader)
-            for _ in range(progress["batch"]):
-                next(iterator)
-            interval_sums = None  # [6]: TRAIN_METRIC_NAMES sums on device.
-            interval_questions = interval_steps = 0
-            started = time.perf_counter()
-            if accelerator.device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats()
-
-            def log_interval():
-                nonlocal interval_sums, interval_questions, interval_steps, started
-                if not interval_steps:
-                    return
-                # One device-to-host transfer per interval completes these metrics.
-                # Wall time includes loading/CPU work; no explicit CUDA synchronize.
-                averages = (interval_sums / interval_questions).cpu().tolist()
-                elapsed = time.perf_counter() - started
-                metrics = {
-                    f"train/{key}": value
-                    for key, value in zip(TRAIN_METRIC_NAMES, averages)
-                }
-                metrics.update(
-                    {
-                        "train/learning_rate": used_lr,
-                        "train/step_seconds": elapsed / interval_steps,
-                        "train/questions_per_second": interval_questions / elapsed,
-                    }
-                )
-                if accelerator.device.type == "cuda":
-                    metrics["train/peak_allocated_gib"] = (
-                        torch.cuda.max_memory_allocated() / 2**30
-                    )
-                    torch.cuda.reset_peak_memory_stats()
-                tracker.log(metrics, progress["step"])
-                bar.set_postfix(loss=averages[0])
-                interval_sums = None
-                interval_questions = interval_steps = 0
-                started = time.perf_counter()
-
-            with tqdm(desc=f"epoch {epoch + 1}", unit="step") as bar:
-                while batches := list(islice(iterator, config.accumulation_steps)):
-                    if (
-                        config.max_steps is not None
-                        and progress["step"] >= config.max_steps
-                    ):
-                        break
-                    used_lr = optimizer.param_groups[0]['lr']
-                    sums, questions = train_step(
-                        model, batches, optimizer, accelerator, config.clip_grad, config.loss
-                    )
-                    if scheduler is not None and not accelerator.optimizer_step_was_skipped:
-                        scheduler.step()
-                    interval_sums = (
-                        sums if interval_sums is None else interval_sums + sums
-                    )
-                    interval_questions += questions
-                    interval_steps += 1
-                    progress["step"] += 1
-                    progress["batch"] += len(batches)
-                    bar.update()
-                    if progress["step"] % config.log_every == 0:
-                        log_interval()
-                    if progress["step"] % config.validate_every == 0:
-                        log_interval()
-                        record_validation()
-                        if stopper.stopped:
-                            break
-                        if accelerator.device.type == "cuda":
-                            torch.cuda.reset_peak_memory_stats()
-                        started = time.perf_counter()
-                    if progress["step"] % config.save_every == 0:
-                        log_interval()
-                        save_latest(
-                            root / "latest.pt", model, optimizer, accelerator, progress, scheduler
-                        )
-                        started = time.perf_counter()
-                else:
-                    progress["epoch"], progress["batch"] = epoch + 1, 0
-                log_interval()
-            record_validation()
-            save_latest(root / "latest.pt", model, optimizer, accelerator, progress, scheduler)
-            if stopper.stopped:
-                tqdm.write(f"Early stopping at step {progress['step']}: "
-                           f"{stopper.state['bad_checks']} checks without CE improvement "
-                           f"> {config.early_stopping.min_delta}. Best weights are saved.")
-                break
-            if config.max_steps is not None and progress["step"] >= config.max_steps:
-                break
-        tracker.status("FINISHED")
-    except BaseException:
-        # Never serialize partially accumulated gradients as a resumable boundary.
-        # The previous periodic latest checkpoint remains authoritative.
-        import sys
-
-        tracker.status("KILLED" if sys.exc_info()[0] is KeyboardInterrupt else "FAILED")
-        raise
-    finally:
-        sender.close()
-    return root
+def train(config: TrainConfig):
+    return run_training(
+        config,
+        lambda accelerator, root, resuming: prepare_head(
+            config, accelerator, root, resuming
+        ),
+    )
 
 
 if __name__ == "__main__":

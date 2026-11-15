@@ -63,15 +63,24 @@ class TrainingValues:
     brier_component: torch.Tensor  # [Q], after configured smoothing scope.
 
 
-def training_values(logits, batch, config: LossConfig) -> TrainingValues:
-    """Normalize once, build the configured objective and original-target reports.
+def training_values(
+    logits,
+    targets,
+    option_to_question,
+    num_questions,
+    target_kinds,
+    config: LossConfig,
+) -> TrainingValues:
+    """Compute from scores and supervision only, independent of model inputs.
+
+    Normalize once, build the configured objective and original-target reports.
 
     Disabled components are still reported, but their autograd graphs are never
     built. Unsmoothed loss values are reused for metrics rather than recomputed.
     """
-    links = batch.features.option_to_question
-    questions = len(batch.features.questions)
-    targets = batch.targets.float()
+    links = option_to_question
+    questions = num_questions
+    targets = targets.float()
     log_probs = question_log_probs(logits, links, questions)
     ce_targets = brier_targets = targets
     if config.label_smoothing:
@@ -79,7 +88,7 @@ def training_values(logits, batch, config: LossConfig) -> TrainingValues:
             0, links, torch.ones_like(log_probs)
         )
         hard = torch.tensor(
-            [kind == "hard" for kind in batch.target_kinds], device=links.device
+            [kind == "hard" for kind in target_kinds], device=links.device
         )
         softened = (
             1 - config.label_smoothing

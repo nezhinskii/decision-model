@@ -1,11 +1,12 @@
 """Serialize decision examples and construct matching attention masks and positions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 import torch
 
 from ..data.schema import Example
+
 
 class AttentionMode(StrEnum):
     causal = "causal"
@@ -68,7 +69,8 @@ class EncodedExample:
 class PackedBatch:
     """CPU tensors; causal batches omit the dense allowed_attention mask.
 
-    For independent branches, True permits a query to read a key.
+    For independent branches, True permits a query to read a key. Positions are
+    immutable after construction; rebuild the batch when changing them.
     """
 
     samples: list[EncodedExample]  # B original encoded contexts.
@@ -77,6 +79,18 @@ class PackedBatch:
     padding_mask: torch.Tensor  # [B, L_max], True for real tokens.
     allowed_attention: torch.Tensor | None  # [B, 1, L_max, L_max], or None for causal.
     config: InputConfig
+    max_position_id: int = field(init=False)
+
+    def __post_init__(self):
+        # Packed inputs are immutable CPU data for the execution path. Rebuild
+        # (or dataclasses.replace) a batch when changing its positions.
+        if self.position_ids.device.type != "cpu":
+            raise ValueError(
+                "Construct PackedBatch positions on CPU before device transfer"
+            )
+        if not self.position_ids.numel():
+            raise ValueError("PackedBatch positions must not be empty")
+        self.max_position_id = int(self.position_ids.max())
 
     @property
     def lengths(self) -> list[int]:
@@ -187,8 +201,12 @@ class InputBuilder:
         self._header_ids = {
             text: self.tokenizer.encode(text, add_special_tokens=False)
             for text in {
-                self._prefix, self._suffix, "Context:\n", "Question:\n",
-                "Option:\n", "Decision:",
+                self._prefix,
+                self._suffix,
+                "Context:\n",
+                "Question:\n",
+                "Option:\n",
+                "Decision:",
             }
         }
         self._separator_ids = self.tokenizer.encode("\n\n", add_special_tokens=False)
@@ -273,7 +291,8 @@ class InputBuilder:
         positions = torch.zeros_like(ids)
         padding = torch.zeros_like(ids, dtype=torch.bool)
         allowed = (
-            None if self.config.attention == "causal"
+            None
+            if self.config.attention == "causal"
             else torch.zeros((len(samples), 1, length, length), dtype=torch.bool)
         )
         for b, sample in enumerate(samples):
@@ -282,7 +301,9 @@ class InputBuilder:
             positions[b, :n] = torch.tensor(sample.positions)
             padding[b, :n] = True
             if allowed is not None:
-                allowed[b, 0, :n, :n] = build_mask(sample.blocks, n, self.config.attention)
+                allowed[b, 0, :n, :n] = build_mask(
+                    sample.blocks, n, self.config.attention
+                )
                 # Self-edges for discarded pad queries avoid fully masked rows and NaNs.
                 for p in range(n, length):
                     allowed[b, 0, p, p] = True

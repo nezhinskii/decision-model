@@ -14,7 +14,7 @@ import src.features.cache as reading
 from src.backbone.pooling import PoolingConfig
 from src.backbone.inputs import InputConfig
 from src.backbone.loading import BackboneConfig
-from src.backbone.model import BackboneOutput
+from src.backbone.forward import BackboneOutput
 from src.data.schema import arrow_schema
 from conftest import make_example
 

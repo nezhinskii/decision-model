@@ -5,7 +5,7 @@ from pathlib import Path
 from enum import StrEnum
 import torch
 from huggingface_hub import resolve_revision
-from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 
 class ComputeDtype(StrEnum):
@@ -101,8 +101,23 @@ class ModelSource:
         """Inspect weight-loading status without triggering I/O."""
         return self._model is not None
 
+    def load_text_decoder(self):
+        """Load a text decoder without choosing freezing, adapters or train/eval mode.
+
+        Architecture-specific text config selection lives here. AutoModel keeps
+        the normal Transformers dispatch for all other supported architectures.
+        """
+        config = self._load_config()
+        if config.model_type == "qwen3_5":
+            config = config.text_config
+        from .forward import validate_decoder
+
+        model = AutoModel.from_pretrained(self.config.model_id, **self._model_kwargs(config))
+        validate_decoder(model)
+        return model
+
     def _model_kwargs(self, config):
-        """One quantization policy for feature extraction and native LM inference."""
+        """Shared dtype/device/quantization settings; callers choose the model class."""
         settings = self.config
         kwargs = dict(
             config=config,

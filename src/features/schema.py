@@ -50,6 +50,18 @@ class LabeledFeatureBatch:
     target_kinds: list[str]  # Q hard/soft labels.
     score_values: list[list[float] | None]  # Q entries, each K_q values or None.
 
+    @property
+    def inputs(self) -> FeatureBatch:
+        return self.features
+
+    @property
+    def option_to_question(self) -> torch.Tensor:
+        return self.features.option_to_question
+
+    @property
+    def num_questions(self) -> int:
+        return len(self.features.question_ids)
+
     def to(self, device: str | torch.device) -> "LabeledFeatureBatch":
         """Move feature/target tensors while keeping IDs and labels as lists."""
         return replace(

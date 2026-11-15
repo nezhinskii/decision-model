@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 from ..backbone.pooling import PoolingConfig, extract_features
 from ..backbone.inputs import InputBuilder, InputConfig, InputTooLongError
 from ..backbone.loading import BackboneConfig
-from ..backbone.model import FrozenBackbone
+from ..backbone.frozen import FrozenBackbone
 from ..data.dataset import read_examples
 from .cache import cache_records
 

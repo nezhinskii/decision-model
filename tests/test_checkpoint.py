@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from src.backbone import model, loading
+from src.backbone import frozen, loading
 
 
 def test_description_and_tokenizer_share_resolved_commit_without_weights(monkeypatch, tokenizer):
@@ -24,8 +24,8 @@ def test_description_and_tokenizer_share_resolved_commit_without_weights(monkeyp
     monkeypatch.setattr(loading, 'resolve_revision', resolve)
     monkeypatch.setattr(loading.AutoConfig, 'from_pretrained', config)
     monkeypatch.setattr(loading.AutoTokenizer, 'from_pretrained', load_tokenizer)
-    monkeypatch.setattr(model.AutoModel, 'from_pretrained', forbidden)
-    backbone = model.FrozenBackbone(loading.BackboneConfig(model_id='fake/model'))
+    monkeypatch.setattr(loading.AutoModel, 'from_pretrained', forbidden)
+    backbone = frozen.FrozenBackbone(loading.BackboneConfig(model_id='fake/model'))
     assert calls == []
     assert backbone.describe()['revision'] == sha
     assert backbone.describe()['num_hidden_layers'] == 32

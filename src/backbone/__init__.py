@@ -1,1 +1,1 @@
-"""Packed decision inputs, lazy frozen backbones and hidden-state extraction."""
+"""Packed decision inputs, shared decoder execution and frozen extraction."""

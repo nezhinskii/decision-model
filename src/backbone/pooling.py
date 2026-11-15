@@ -6,7 +6,7 @@ from enum import StrEnum
 import torch
 
 from .inputs import Block, PackedBatch
-from .model import BackboneOutput
+from .forward import BackboneOutput
 from ..features.schema import FeatureBatch
 
 

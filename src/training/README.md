@@ -1,10 +1,40 @@
 # Head training
 
-- `train_head.py`: typed CLI, cached datasets, head/optimizer construction and run lifecycle.
-- `loop.py`: question-weighted optimization and validation shared across head types.
+- `train_head.py`: cached-head CLI and task assembly: cache validation, loaders,
+  head/optimizer construction, source artifacts and provenance.
+- `config.py`: common training/run options. `TrainConfig` adds cache/head fields;
+  existing CLI flags and saved JSON fields retain their names and defaults.
+- `runner.py`: model-independent lifecycle: resume checks, schedules, epochs,
+  accumulation boundaries, validation/best selection, early stopping and tracking.
+- `loop.py`: question-weighted optimizer steps and validation over a small supervised
+  batch contract, independent of feature tensors or token layout.
 - `objectives.py`: CE/Brier objective, hard-target smoothing and detached training reports.
-- `checkpoints.py`: atomic `latest.pt` snapshots with optimizer/RNG/data progress.
+- `checkpoints.py`: atomic `latest.pt` snapshots with optimizer/RNG/data progress
+  and an explicit model-state codec. The default full-state codec preserves existing
+  head behavior; adapter-only codecs can be supplied by a future live-model path.
 - `heads/checkpoints.py`: portable best-model safetensors weights.
+
+## Boundaries for additional training paths
+
+A task assembler returns `TrainingSetup`: model, optimizer, train/validation loaders,
+updates per epoch, a best-weight exporter, optional model-state codec and descriptive
+artifacts/tags. It validates its own source identity before tracking is reopened.
+The runner does not inspect head settings, feature-cache manifests or adapter modules.
+Loaders must be re-iterable and expose `dataset.set_epoch(epoch)` for deterministic resume.
+
+Training batches expose `inputs`, `targets`, `option_to_question`, `num_questions`,
+`categories`, `target_kinds` and `to(device)`. Existing `LabeledFeatureBatch` provides
+these properties without changing its serialized cache format. Loss receives explicit
+scores/supervision rather than reaching into a feature batch.
+
+Model-state codecs implement `format`, `dump(model)` and `restore(model, state)`.
+A mismatch is rejected before restoring weights/optimizer. Old snapshots without a
+format field are treated as full-state snapshots. Frozen base identity belongs in the
+run configuration/provenance; a partial-state codec does not serialize the base.
+The existing head exporter remains responsible for best.safetensors; the runner owns
+best.json and invokes the assembler's exporter only when validation CE improves.
+
+This is preparatory separation: there is no LoRA trainer or new live-model CLI yet.
 
 ## Train
 

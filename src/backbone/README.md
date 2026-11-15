@@ -3,9 +3,12 @@
 - `inputs.py`: serialize common-format examples, retain content spans, build a
   matching branch positions, then right-pad batches. Independent modes also build
   a dense allowed-attention mask; causal batches leave `allowed_attention=None`.
-- `loading.py`: shared revision/tokenizer resolution and dtype/NF4/device settings.
-- `model.py`: frozen `AutoModel` wrapper and selected decoder outputs.
-  No language-model output head is loaded by this API.
+- `loading.py`: shared revision/tokenizer resolution, dtype/NF4/device settings and
+  text-decoder loading. Loading alone does not freeze weights or choose train/eval mode.
+- `forward.py`: `BackboneOutput`, a plain `forward_decoder` function and differentiable
+  selected-layer extraction. It preserves the caller's train/eval mode and removes hooks after each forward.
+- `frozen.py`: lazy `FrozenBackbone` facade; freezes the decoder, selects eval mode and
+  runs the shared extraction under `no_grad`. No LM output head is loaded.
 - `pooling.py`: last/mean pooling into flat question and option tensors, plus
   optional final-layer context memory.
 
@@ -34,11 +37,38 @@ without a vision tower or LM head. Other causal decoders must expose `layers`,
 input embeddings and the standard text configuration/output fields used here.
 Independent branches remain limited to Qwen3/Llama full-attention layouts;
 Qwen3.5's recurrent state cannot be isolated by a 4D attention mask.
-Qwen3.5's optional DeltaNet kernels affect speed and memory; the wrapper does not
-install them automatically. Pretrained/NF4 Qwen3.5 execution is not yet verified.
-LoRA is not implemented. Native LM-head evaluation lives in
+Kernel selection is left to the installed model libraries. The native-inference
+convolution bridge is not installed by this loader and has not been extended to training.
+LoRA training is not implemented yet; the shared forward/pooling path preserves autograd
+for its later integration. Native LM-head evaluation lives in
 [`src/evaluation`](../evaluation/README.md), using the separate native LM wrapper. Pooled feature-cache
 preparation and loading are described in [../features/README.md](../features/README.md).
+
+## Shared execution and freezing
+
+Import `FrozenBackbone` from `src.backbone.frozen`, and `BackboneOutput` or
+`forward_decoder` from `src.backbone.forward`. The old `src.backbone.model` module
+has been renamed; update notebook imports as well.
+
+`ModelSource.load_text_decoder()` centralizes architecture-specific loading (currently
+text-config selection for multimodal Qwen3.5, ordinary AutoModel dispatch otherwise).
+It does not attach adapters, freeze parameters or install runtime kernel patches.
+`forward_decoder(model, batch, layers, metadata)` is an ordinary function: it builds
+the model-facing mask, installs temporary hooks, calls the decoder and returns selected
+states. It preserves gradients and train/eval mode. There are no execution-plan objects,
+binding stage or plan cache. Layer numbers are checked per call so callers can change them.
+
+Decoder layout is checked by the text loader or when wrapping an in-memory model.
+Attention compatibility is the caller's responsibility: FrozenBackbone checks it before
+loading weights, while a future live model can check its fixed input mode at setup.
+The shared forward does not repeat that check.
+
+`PackedBatch` computes its maximum position once on CPU during construction. Execution
+compares that Python integer with the model limit without reducing a device tensor.
+Treat packed inputs as immutable: rebuild the batch (or use dataclasses.replace) when
+changing positions. GPU positions at construction are rejected, rather than synchronized.
+Batch-specific masks/transfers remain in execution. Hooks are removed even when the
+decoder raises. Gradient-checkpointed training remains a separate integration to validate.
 
 ## Input settings
 

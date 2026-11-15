@@ -27,7 +27,7 @@ from src.evaluation.evaluate_head import HeadEvaluationConfig, evaluate_head as 
 from test_cache import cache_setup
 from test_training import single_thread_accelerate
 
-training = importlib.import_module('src.training.train_head')
+training = importlib.import_module('src.training.runner')
 evaluation = importlib.import_module('src.evaluation.run')
 
 
