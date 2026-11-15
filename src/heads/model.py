@@ -9,7 +9,7 @@ from ..features.schema import FeatureBatch
 from .projection import InputProjection
 from .processors import IdentityProcessor, JointProcessor, SeparateMLPProcessor
 from .scorers import PointerScorer
-from .readout import LayerReadout, ReadoutMode
+from .readout import LayerReadout, ReadoutMode, resolve_layer_indices
 from .norms import NormType
 
 
@@ -34,8 +34,21 @@ class HeadConfig:
     dropout: float = 0.0
     readout: ReadoutMode = ReadoutMode.last
     layer_indices: tuple[int, ...] = ()  # Empty means all R cached layers, in order.
+    context_layer: int | None = None  # Actual decoder depth; None follows readout, -1 means final.
     router_dim: int = 128
     norm_type: NormType = NormType.layernorm
+
+    def context_depth(self, layers, final_depth):
+        """Shared live/cache policy; context_layer is a decoder depth, not an axis index."""
+        if self.context_layer is not None:
+            depth = final_depth if self.context_layer == -1 else self.context_layer
+            if depth is None or depth < 1:
+                raise ValueError("context_layer needs a positive depth, or -1 with known final depth")
+            return depth
+        indices = resolve_layer_indices(len(layers), self.layer_indices)
+        if self.readout == "last":
+            indices = indices[-1:]
+        return max(layers[i] for i in indices)
 
     @property
     def requires_context(self) -> bool:

@@ -132,3 +132,8 @@ The same run lifecycle, prediction journal, reference cohort and metrics are reu
 Over-budget contexts are recorded as context_limit for every affected question,
 not dropped from coverage/accuracy. This command does not read a feature cache.
 See [model documentation](../models/README.md) for complete training/evaluation examples.
+
+
+Cached-head evaluation restores `head.context_layer` from the training config.
+Multilayer context caches use the same readout-based automatic selection as training;
+a missing requested depth fails rather than silently substituting another layer.

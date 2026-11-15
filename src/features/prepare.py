@@ -13,7 +13,8 @@ from ..utils.files import file_hash
 from tqdm.auto import tqdm
 import pyarrow.parquet as pq
 
-from ..backbone.pooling import PoolingConfig, extract_features
+from ..backbone.pooling import PoolingConfig, extract_features, extract_contexts
+from ..backbone.forward import BackboneOutput
 from ..backbone.inputs import InputBuilder, InputConfig, InputTooLongError
 from ..backbone.loading import BackboneConfig
 from ..backbone.frozen import FrozenBackbone
@@ -32,6 +33,7 @@ class PrepareConfig:
     inputs: InputConfig = field(default_factory=InputConfig)
     pooling: PoolingConfig = field(default_factory=PoolingConfig)
     layers: tuple[int, ...] = (-1,)
+    context_layers: tuple[int, ...] = ()  # Optional context-token depths, independent of pooled layers.
     batch_size: int = 1
     shard_size: int = 256
 
@@ -67,6 +69,11 @@ def prepare(config: PrepareConfig) -> Path:
         raise ValueError("Cache name must be one directory name")
     if min(config.batch_size, config.shard_size) < 1:
         raise ValueError("batch_size and shard_size must be positive")
+    if config.context_layers and config.pooling.context_layer is not None:
+        raise ValueError("Use context_layers or pooling.context_layer, not both")
+    if any(layer != -1 and layer < 1 for layer in config.context_layers):
+        raise ValueError("context_layers must contain positive depths or -1")
+    cache_format = 5 if config.context_layers else 4
     source_manifest = json.loads((config.dataset / "manifest.json").read_text())
     source_files = {}
     for split in ("train", "validation", "test"):
@@ -94,6 +101,8 @@ def prepare(config: PrepareConfig) -> Path:
         "pooling": resolved["pooling"],
         "layers": resolved["layers"],
     }
+    if config.context_layers:
+        settings["context_layers"] = resolved["context_layers"]
     destination = config.output / config.name
     manifest_path = destination / "manifest.json"
     if manifest_path.exists():
@@ -114,7 +123,7 @@ def prepare(config: PrepareConfig) -> Path:
                 },
             }
         if (
-            manifest.get("format_version") != 4
+            manifest.get("format_version") != cache_format
             or previous_settings != settings
             or manifest.get("source_files") != source_files
         ):
@@ -161,7 +170,7 @@ def prepare(config: PrepareConfig) -> Path:
         checkpoint = backbone.describe()
         destination.mkdir(parents=True, exist_ok=True)
         manifest = {
-            "format_version": 4,
+            "format_version": cache_format,
             "settings": settings,
             "config": resolved,
             "source_files": source_files,
@@ -187,6 +196,18 @@ def prepare(config: PrepareConfig) -> Path:
             },
         }
         save_manifest(manifest_path, manifest)
+
+    extraction_layers = config.layers
+    context_layers = ()
+    feature_layers = None
+    if config.context_layers:
+        depth = backbone.describe()["num_hidden_layers"]
+        feature_layers = tuple(depth if layer == -1 else layer for layer in config.layers)
+        context_layers = tuple(depth if layer == -1 else layer for layer in config.context_layers)
+        if (len(set(context_layers)) != len(context_layers)
+                or any(layer > depth for layer in context_layers)):
+            raise ValueError("context_layers must be distinct depths within the decoder")
+        extraction_layers = tuple(dict.fromkeys((*feature_layers, *context_layers)))
 
     builder = None
     for split, source in source_files.items():
@@ -260,17 +281,35 @@ def prepare(config: PrepareConfig) -> Path:
                             )
                     if encoded:
                         batch = builder.pack(encoded)
-                        output = backbone.forward(batch, layers=config.layers)
-                        features = extract_features(output, batch, config.pooling)
+                        output = backbone.forward(batch, layers=extraction_layers)
+                        contexts_by_layer = None
+                        if context_layers:
+                            pooled_output = BackboneOutput(
+                                {layer: output.hidden_states[layer] for layer in feature_layers},
+                                {**output.metadata, "layers": list(feature_layers)},
+                            )
+                            features = extract_features(
+                                pooled_output, batch, replace(config.pooling, include_context=False)
+                            )
+                            features.metadata["pooling"] = {**asdict(config.pooling), "include_context": True}
+                            features.metadata["context_layers"] = list(context_layers)
+                            features.metadata["context_layer"] = None
+                            contexts_by_layer = {
+                                layer: extract_contexts(output, batch, layer) for layer in context_layers
+                            }
+                        else:
+                            features = extract_features(output, batch, config.pooling)
                         if manifest["features"] is None:
                             manifest["features"] = features.metadata
                             save_manifest(manifest_path, manifest)
                         records.extend(
                             cache_records(
-                                features, [sample.example for sample in encoded]
+                                features, [sample.example for sample in encoded], contexts_by_layer=contexts_by_layer
                             )
                         )
-                        del output, features
+                        del output, features, contexts_by_layer
+                        if context_layers:
+                            del pooled_output
                     progress.update(len(chunk))
                 path = destination / split / f"part-{len(info['parts']):05d}.pt"
                 temporary = path.with_suffix(".pt.tmp")

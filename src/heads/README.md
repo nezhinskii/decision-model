@@ -129,3 +129,11 @@ a tiny random CPU decoder, cache roundtrips/resume/skips, data selection and
 checkpoint revision pinning. Cache lifecycle tests use temporary files and a fake
 backbone; no model downloads, GPU or real-cache scans occur. These checks do not
 measure CUDA performance or pretrained/NF4-backbone numerical correctness.
+
+
+Context depth is an input-selection setting, independent of the layer readout weights.
+`HeadConfig.context_layer` selects an actual decoder depth (`-1` means final).
+When omitted, `context_depth` chooses the deepest depth actually used by the readout;
+`last` uses only the last selected axis index. Both live models and multilayer-context
+cache loaders use this rule. Legacy single-context caches retain their original memory
+by default. Changing head context depth does not add trainable parameters.

@@ -119,3 +119,37 @@ def test_real_tiny_decoder_packed_matches_visible_causal_paths(tokenizer, exampl
                 position_ids=torch.arange(len(keep))[None], use_cache=False).last_hidden_state
             torch.testing.assert_close(result.hidden_states[2][0, endpoint], separate[0, -1], atol=2e-6, rtol=2e-5)
     assert not any(layer._forward_hooks for layer in backbone.load().layers)
+
+
+@pytest.mark.parametrize('requested,explicit,expected', [
+    ((24, 16), None, 24),
+    ((16, 24, 32), 16, 16),
+    ((16, 24, 32), -1, 32),
+])
+def test_context_depth_values_metadata_and_gradients(tokenizer, example, requested, explicit, expected):
+    batch = InputBuilder(tokenizer, InputConfig(attention='causal'))([example])
+    b, length = batch.input_ids.shape
+    states = {layer: torch.full((b, length, 3), float(layer), requires_grad=True)
+              for layer in requested}
+    features = extract_features(BackboneOutput(states, {'num_hidden_layers': 32}), batch,
+                               PoolingConfig(include_context=True, context_layer=explicit))
+    assert features.metadata['context_layer'] == expected
+    assert features.metadata['pooling']['context_layer'] == explicit
+    assert features.contexts[0].shape[-1] == 3
+    torch.testing.assert_close(features.contexts[0], torch.full_like(features.contexts[0], float(expected)))
+    features.contexts[0].sum().backward()
+    for layer, tensor in states.items():
+        assert (tensor.grad is not None) == (layer == expected)
+
+
+def test_context_depth_must_be_available_but_is_ignored_without_context(tokenizer, example):
+    batch = InputBuilder(tokenizer, InputConfig(attention='causal'))([example])
+    b, length = batch.input_ids.shape
+    output = BackboneOutput({16: torch.zeros(b, length, 3)}, {'num_hidden_layers': 32})
+    with pytest.raises(ValueError, match='must be included'):
+        extract_features(output, batch, PoolingConfig(include_context=True, context_layer=-1))
+    features = extract_features(output, batch, PoolingConfig(context_layer=24))
+    assert features.contexts is None and features.metadata['context_layer'] is None
+    for invalid in (0, -2):
+        with pytest.raises(ValueError, match='context_layer'):
+            PoolingConfig(context_layer=invalid)

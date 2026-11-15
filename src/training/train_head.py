@@ -25,10 +25,10 @@ def prepare_head(config, accelerator, root, resuming):
     """Resolve cache, construct head/optimizer and describe this specific task."""
     context = config.head.requires_context
     train_loader = make_loader(
-        config.cache, "train", context, config.batch_size, config.seed, True
+        config.cache, "train", context, config.batch_size, config.seed, True, head_config=config.head
     )
     val_loader = make_loader(
-        config.cache, "validation", context, config.batch_size, config.seed
+        config.cache, "validation", context, config.batch_size, config.seed, head_config=config.head
     )
     manifest = train_loader.dataset.manifest
     if resuming:
@@ -64,6 +64,7 @@ def prepare_head(config, accelerator, root, resuming):
         provenance={
             **dimensions,
             "cache": str(config.cache.resolve()),
+            "context_layer": train_loader.dataset.context_layer,
             "parameters": sum(p.numel() for p in model.parameters()),
         },
         tags={"processor": str(config.head.processor)},

@@ -37,7 +37,8 @@ class CachedHeadSource:
             raise ValueError("Checkpoint checksum mismatch")
         context = self.saved.head.requires_context
         self.loader = make_loader(
-            self.saved.cache, config.split, context, config.batch_size, self.saved.seed
+            self.saved.cache, config.split, context, config.batch_size, self.saved.seed,
+            head_config=self.saved.head
         )
         manifest = self.loader.dataset.manifest
         check_cache(config.run, manifest)
@@ -65,6 +66,9 @@ class CachedHeadSource:
             ],
             "source_train_run_id": tracking["local_run_id"],
         }
+        if (manifest["features"].get("context_layers") is not None
+                or self.saved.head.context_layer is not None):
+            self.signature["context_layer"] = self.loader.dataset.context_layer
         self.provenance = {
             "checkpoint": str(self.weights.resolve()),
             "cache": str(self.saved.cache.resolve()),

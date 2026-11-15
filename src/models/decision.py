@@ -7,10 +7,10 @@ import torch
 from torch import nn
 
 from ..backbone.forward import forward_decoder, validate_attention, validate_decoder
-from ..backbone.inputs import InputConfig
+from ..backbone.inputs import AttentionMode, InputConfig
 from ..backbone.loading import BackboneConfig, ModelSource
 from ..backbone.lora import LoRAConfig, attach_lora, adapter_summary
-from ..backbone.pooling import PoolingConfig, extract_features
+from ..backbone.pooling import PoolingConfig, extract_features, resolve_context_layer
 from ..heads import HeadConfig, build_head
 from ..utils.files import file_hash
 
@@ -19,7 +19,7 @@ from ..utils.files import file_hash
 class DecisionConfig:
     backbone: BackboneConfig
     lora: LoRAConfig = field(default_factory=LoRAConfig)
-    inputs: InputConfig = field(default_factory=lambda: InputConfig(attention="causal"))
+    inputs: InputConfig = field(default_factory=lambda: InputConfig(attention=AttentionMode.causal))
     pooling: PoolingConfig = field(default_factory=PoolingConfig)
     layers: tuple[int, ...] = (-1,)
     head: HeadConfig = field(default_factory=HeadConfig)
@@ -62,16 +62,9 @@ class DecisionModel(nn.Module):
             or any(not 1 <= layer <= depth for layer in resolved)
         ):
             raise ValueError("Decision layers must be distinct valid decoder depths")
-        if config.head.requires_context and depth not in resolved:
-            raise ValueError(
-                "Cross-attention requires the final decoder layer for context memory"
-            )
         self.settings = config
         self.identity = identity
         self.layers = resolved
-        self.pooling = replace(
-            config.pooling, include_context=config.head.requires_context
-        )
         if config.lora.enabled:
             self.decoder = attach_lora(
                 decoder,
@@ -88,6 +81,21 @@ class DecisionModel(nn.Module):
                 "total_parameters": sum(p.numel() for p in decoder.parameters()),
             }
         self.head = build_head(decoder.config.hidden_size, config.head, len(resolved))
+        context_layer = None
+        if config.head.requires_context:
+            if (config.head.context_layer is not None and config.pooling.context_layer is not None
+                    and config.head.context_depth(resolved, depth) !=
+                    (depth if config.pooling.context_layer == -1 else config.pooling.context_layer)):
+                raise ValueError("head.context_layer and pooling.context_layer disagree")
+            policy = config.head
+            if policy.context_layer is None and config.pooling.context_layer is not None:
+                policy = replace(policy, context_layer=config.pooling.context_layer)
+            context_layer = resolve_context_layer(resolved, policy.context_depth(resolved, depth), depth)
+        self.pooling = replace(
+            config.pooling,
+            include_context=config.head.requires_context,
+            context_layer=context_layer,
+        )
         # Accelerate does not have to move an already-placed quantized decoder.
         self.head.to(device=decoder.get_input_embeddings().weight.device)
         self.train(training)

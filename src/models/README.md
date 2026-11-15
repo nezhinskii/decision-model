@@ -12,8 +12,17 @@ loaded. No native-generation convolution patches or compilation modes are instal
 All head processors and last/mean/static/adaptive readouts are available. `model.layers`
 selects 1-based backbone depths (`-1` means final); `model.head.layer-indices` selects
 indices in that extracted axis. Context memory is enabled automatically for heads
-requiring it and comes from the final normalized layer. Such heads require the final
-layer in `model.layers`. Pooling and input conventions match frozen feature extraction.
+requiring it. By default it comes from the deepest depth actually used by the
+readout (`last` uses only its last selected index). For example, extracted depths
+16/24/32 with readout indices 0/1 use context from depth 24. Set
+`--model.head.context-layer 32` (or `-1` for final) to override this; the requested
+context depth must be present in `model.layers`. Intermediate states remain decoder
+block outputs; only the true final depth includes final normalization. This changes
+feature selection, not decoder execution: all blocks still run, with no truncation.
+Pooling and input conventions match frozen feature extraction.
+The same `HeadConfig.context_depth` rule is used by cached-head loaders.
+`model.pooling.context_layer` remains accepted for compatibility; contradictory
+explicit head/pooling depths are rejected.
 
 ## Train
 

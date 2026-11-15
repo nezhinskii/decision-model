@@ -188,3 +188,11 @@ autograd. With no smoothing their values are reused for the original-target repo
 with smoothing only the quantities whose targets differ are recomputed. Training
 loss and reporting share the same CE/Brier functions. The six-column packing exists
 only when summing values for existing training logs, in `TRAIN_METRIC_NAMES` order.
+
+
+For a cache containing multiple context depths, pass `--head.context-layer 24` to
+`src.training.train_head` to choose one. If omitted, the deepest depth actually used
+by the readout is selected. For example, cached pooled depths 12/16/24/32 with
+`--head.readout static --head.layer-indices 1 2` select context depth 24. That depth
+must exist in the cache's context layers. The selected context depth is recorded in
+provenance, and evaluation restores the same policy from the saved head config.

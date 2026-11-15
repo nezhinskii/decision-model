@@ -34,11 +34,42 @@ Use the opt-in tokenizer-only length analysis in `notebooks/backbone.ipynb` to
 choose a packed-token budget before extraction. Batch and shard defaults remain
 provisional until GPU throughput and actual shard sizes are measured.
 
-Add `--pooling.include-context` to store context-token features for cross-attention.
-The final layer must be requested (for example `--layers -1`). Each context is
-stored once as `[context_tokens, hidden_size]` from the final normalized layer,
-excluding headers, separators and padding. This can substantially increase cache
-size and CPU memory per shard; reduce `--shard-size` as needed.
+Cache multiple context depths explicitly, independently of the question/option depths:
+
+```powershell
+uv run python -m src.features.prepare `
+  --name qwen_mid_context `
+  --dataset artifacts/data/prepared/research_50_2_2_2048 `
+  --backbone.model-id Qwen/Qwen3.5-4B `
+  --inputs.attention causal `
+  --layers 12 14 16 18 20 24 `
+  --context-layers 16 18 20 24 32 `
+  --shard-size 32
+```
+
+`--context-layers` automatically enables context storage. These are actual 1-based
+decoder depths (`-1` means final), not indices on the question/option layer axis.
+Context-only depths need not appear in `--layers`; they do not add pooled features.
+The decoder runs once per batch for the union of requested depths. Format 5 stores
+`contexts_by_layer` in each record and lists available depths in
+`manifest.features.context_layers`. Every tensor contains only the original context
+span, without headers, separators or padding. Intermediate depths are block outputs;
+only the true final depth includes final normalization.
+
+Cached-head training selects one depth with `--head.context-layer 24` (`-1` means
+final). Without an explicit depth, the deepest depth actually used by the head
+readout is selected; `last` uses only its last selected index. Missing depths fail
+at loader creation, without falling back to another depth. The selection is saved
+in the run config/provenance and restored during evaluation. Only the selected
+context is collated/transferred to GPU. Entire shard files are still read on CPU,
+so storing multiple depths increases disk use and transient RAM; use smaller shards.
+
+For the older single-context format, `--pooling.include-context` stores one depth,
+by default the deepest pooled depth; `--pooling.context-layer` selects another
+requested depth. It cannot be combined with `--context-layers`. Existing single-context
+caches remain readable and retain their stored context by default, including when
+loading old trained heads. An explicit request for another depth is rejected.
+Use a new cache name to change stored depths; existing files are not rewritten.
 
 Inputs exceeding the actual packed-token budget are skipped as whole context
 records. IDs, categories and the reason are saved in the shard's `skipped` list;

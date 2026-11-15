@@ -137,9 +137,10 @@ than enabling all model hidden states. Discard the full output after pooling.
 and question-to-context indices. `P/V` count real questions/options, `R` is the
 number of requested layers. Pooling excludes top-level block headers, appended
 separators and padding. Option content includes its criteria. Decision always uses
-the last token of its marker. Optional context memory comes from the final layer
-only; that layer must be requested. Returned metadata records input and pooling
-settings and the layer convention for future caching.
+the last token of its marker. Optional context memory defaults to the deepest extracted
+layer; `PoolingConfig.context_layer` selects an explicit requested depth (`-1` means
+final). Returned metadata records the effective context depth, input/pooling settings
+and the layer convention for future caching.
 The returned container is the shared `src.features.schema.FeatureBatch`, also used by
 the cache reader. It contains head inputs only, without targets, and `.to(device)`
 preserves gradient connections for future trainable-backbone use.

@@ -139,3 +139,14 @@ def test_nonlength_errors_are_not_silently_skipped(cache_setup, monkeypatch):
     manifest = json.loads((config.output / config.name / 'manifest.json').read_text())
     assert not manifest['complete']
     assert not manifest['splits']['train']['parts']
+
+
+def test_context_depth_is_saved_and_cannot_silently_change_on_resume(cache_setup):
+    config, _, _ = cache_setup
+    config = replace(config, pooling=replace(config.pooling, context_layer=-1))
+    root = preparation.prepare(config)
+    manifest = json.loads((root / 'manifest.json').read_text())
+    assert manifest['settings']['pooling']['context_layer'] == -1
+    assert manifest['features']['context_layer'] == manifest['features']['num_hidden_layers']
+    with pytest.raises(ValueError, match='different settings'):
+        preparation.prepare(replace(config, pooling=replace(config.pooling, context_layer=None)))

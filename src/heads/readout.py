@@ -15,13 +15,22 @@ class ReadoutMode(StrEnum):
     adaptive = "adaptive"
 
 
+def resolve_layer_indices(num_layers, indices):
+    selected = tuple(indices) or tuple(range(num_layers))
+    if num_layers < 1 or any(not -num_layers <= i < num_layers for i in selected):
+        raise ValueError("Readout layer index is outside the cached layer axis")
+    if len({i % num_layers for i in selected}) != len(selected):
+        raise ValueError("Readout needs distinct cached layer indices")
+    return selected
+
+
 class LayerReadout(nn.Module):
     """Mix projected layers; the same question weights apply to all its options.
 
     Adaptive routing scores each layer's question and mean option states using
     the same small MLP for every layer, then normalizes scores across layers.
     Indices refer to the cache layer axis, not decoder depths. Token memory is
-    untouched and always comes from the final backbone layer.
+    untouched; its decoder depth is selected during feature extraction.
     """
 
     def __init__(
@@ -29,13 +38,7 @@ class LayerReadout(nn.Module):
     ):
         super().__init__()
         self.mode = ReadoutMode(mode)
-        self.indices = tuple(indices) or tuple(range(num_layers))
-        if not self.indices or len({i % num_layers for i in self.indices}) != len(
-            self.indices
-        ):
-            raise ValueError("Readout needs distinct cached layer indices")
-        if any(not -num_layers <= i < num_layers for i in self.indices):
-            raise ValueError("Readout layer index is outside the cached layer axis")
+        self.indices = resolve_layer_indices(num_layers, indices)
         self.num_layers = num_layers
         count = len(self.indices)
         self.logits = (

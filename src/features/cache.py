@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from .schema import FeatureBatch, LabeledFeatureBatch
 
 
-def cache_records(features, examples) -> list[dict]:
+def cache_records(features, examples, *, contexts_by_layer=None) -> list[dict]:
     """Detach each shared context into independent CPU tensors and aligned labels."""
     records = []
     q_start = o_start = 0
@@ -46,6 +46,11 @@ def cache_records(features, examples) -> list[dict]:
                 "score_values": [q.score_values for q in example.questions],
             }
         )
+        if contexts_by_layer is not None:
+            records[-1]["contexts_by_layer"] = {
+                layer: contexts[index].detach().cpu().clone()
+                for layer, contexts in contexts_by_layer.items()
+            }
         q_start, o_start = q_stop, o_stop
     return records
 
@@ -104,6 +109,8 @@ class FeatureDataset(IterableDataset):
         shuffle: bool = False,
         seed: int = 42,
         include_context: bool = False,
+        context_layer: int | None = None,
+        head_config=None,
     ):
         self.root = Path(root)
         self.manifest = json.loads((self.root / "manifest.json").read_text())
@@ -120,6 +127,33 @@ class FeatureDataset(IterableDataset):
             raise ValueError(
                 "This cache has no context features; use include_context=False"
             )
+        self.context_layer = None
+        self.feature_metadata = dict(self.manifest["features"])
+        if include_context:
+            metadata = self.manifest["features"]
+            final = metadata.get("num_hidden_layers")
+            available = metadata.get("context_layers")
+            if available is not None:
+                if context_layer is not None:
+                    selected = final if context_layer == -1 else context_layer
+                elif head_config is not None:
+                    selected = head_config.context_depth(metadata["layers"], final)
+                else:
+                    selected = max(available)
+                if selected not in available:
+                    raise ValueError(f"Context layer {selected} is not cached; available: {available}")
+            else:
+                # Legacy caches have one context tensor. Preserve old run semantics.
+                selected = metadata.get("context_layer", final)
+                explicit = context_layer
+                if explicit is None and head_config is not None:
+                    explicit = head_config.context_layer
+                if explicit is not None:
+                    requested = final if explicit == -1 else explicit
+                    if requested != selected:
+                        raise ValueError(f"Context layer {requested} is not cached; available: {selected}")
+            self.context_layer = selected
+            self.feature_metadata["context_layer"] = selected
         self.shuffle = shuffle
         self.seed = seed
         self.epoch = 0
@@ -145,21 +179,29 @@ class FeatureDataset(IterableDataset):
             for record in records:
                 # Contexts share the shard file, so torch.load still reads them.
                 # Dropping references here prevents transfer to workers' batches/GPU.
+                by_layer = record.pop("contexts_by_layer", None)
                 if not self.include_context:
                     record["context"] = None
+                elif by_layer is not None:
+                    if self.context_layer not in by_layer:
+                        raise ValueError("A cache record is missing the requested context layer")
+                    record["context"] = by_layer[self.context_layer]
+                elif self.manifest["features"].get("context_layers") is not None:
+                    raise ValueError("A cache record is missing contexts_by_layer")
                 elif record.get("context") is None:
-                    raise ValueError(
-                        "A cache record is missing requested context features"
-                    )
-                record["feature_metadata"] = self.manifest["features"]
+                    raise ValueError("A cache record is missing requested context features")
+                record["feature_metadata"] = self.feature_metadata
+                del by_layer
             if self.shuffle:
                 rng.shuffle(records)
             yield from records
+            del records, payload
 
 
-def make_loader(cache, split, context, batch_size, seed, shuffle=False):
+def make_loader(cache, split, context, batch_size, seed, shuffle=False, *, context_layer=None, head_config=None):
     dataset = FeatureDataset(
-        cache, split, shuffle=shuffle, seed=seed, include_context=context
+        cache, split, shuffle=shuffle, seed=seed, include_context=context,
+        context_layer=context_layer, head_config=head_config
     )
     # Dedicated generator prevents iterator creation/skipping from consuming model
     # RNG on resume. num_workers=0 fixes the reproducible source cursor.

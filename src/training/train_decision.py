@@ -109,6 +109,7 @@ def prepare_decision(config, accelerator, root, resuming, source, identity):
             "input_dim": text.hidden_size,
             "num_feature_layers": len(model.layers),
             "layers": list(model.layers),
+            "context_layer": model.pooling.context_layer,
             "base": identity,
             "parameters": sum(p.numel() for p in model.parameters()),
             "trainable_parameters": sum(

@@ -255,7 +255,47 @@ def test_nf4_request_without_quantized_decoder_is_rejected(live_setup):
         DecisionModel(base, settings, {'model_id': 'tiny', 'revision': None})
 
 
-def test_cross_head_requires_final_layer(live_setup):
+@pytest.mark.parametrize("readout,indices,expected", [
+    ("static", (0,), 1), ("adaptive", (0,), 1),
+    ("mean", (), 2), ("last", (1, 0), 1), ("static", (-2,), 1),
+])
+def test_cross_context_defaults_to_deepest_used_readout_layer(live_setup, readout, indices, expected):
     config, _ = live_setup
-    with pytest.raises(ValueError, match='final decoder layer'):
-        load_decision(replace(config.model, layers=(1,), head=replace(config.model.head, processor='joint')))
+    settings = replace(config.model, head=replace(config.model.head,
+        processor="joint", readout=readout, layer_indices=indices))
+    model = load_decision(settings)
+    assert model.pooling.context_layer == expected
+    batch = next(iter(make_decision_loader(dataset_for(config), 1)))
+    model(batch.inputs).square().sum().backward()
+    assert any(p.grad is not None for p in model.head.parameters())
+    assert any(p.grad is not None for p in model.decoder.parameters() if p.requires_grad)
+
+
+def test_cross_can_use_only_intermediate_layers_and_explicit_context(live_setup):
+    from src.backbone.pooling import PoolingConfig
+    config, _ = live_setup
+    settings = replace(config.model, layers=(1,),
+        head=replace(config.model.head, processor="joint"))
+    model = load_decision(settings)
+    assert model.layers == (1,) and model.pooling.context_layer == 1
+    batch = next(iter(make_decision_loader(dataset_for(config), 1)))
+    assert model(batch.inputs).shape == batch.targets.shape
+    explicit = load_decision(replace(config.model,
+        head=replace(config.model.head, processor="joint", layer_indices=(0,)),
+        pooling=PoolingConfig(context_layer=-1)))
+    assert explicit.pooling.context_layer == 2
+    with pytest.raises(ValueError, match="must be included"):
+        load_decision(replace(settings, pooling=PoolingConfig(context_layer=2)))
+
+
+def test_live_head_context_override_matches_cached_head_policy(live_setup):
+    config, _ = live_setup
+    settings = replace(config.model, head=replace(config.model.head,
+        processor='joint', layer_indices=(0,), context_layer=2))
+    model = load_decision(settings)
+    assert model.pooling.context_layer == 2
+    batch = next(iter(make_decision_loader(dataset_for(config), 1)))
+    assert model(batch.inputs).shape == batch.targets.shape
+    conflicting = replace(settings, pooling=replace(settings.pooling, context_layer=1))
+    with pytest.raises(ValueError, match='disagree'):
+        load_decision(conflicting)
