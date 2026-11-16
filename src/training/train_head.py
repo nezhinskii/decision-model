@@ -36,7 +36,7 @@ def prepare_head(config, accelerator, root, resuming):
     first = next(iter(train_loader))
     dimensions = {
         "input_dim": first.features.questions.shape[-1],
-        "num_feature_layers": first.features.questions.shape[1],
+        "num_feature_layers": first.features.source_num_layers or first.features.questions.shape[1],
     }
     del first
     model = build_head(config=config.head, **dimensions)

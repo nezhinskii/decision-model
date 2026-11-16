@@ -3,10 +3,12 @@
 import json
 from pathlib import Path
 import random
+from functools import partial
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from .schema import FeatureBatch, LabeledFeatureBatch
+from .storage import load_contexts
 
 
 def cache_records(features, examples, *, contexts_by_layer=None) -> list[dict]:
@@ -55,8 +57,20 @@ def cache_records(features, examples, *, contexts_by_layer=None) -> list[dict]:
     return records
 
 
-def collate_features(records: list[dict]) -> LabeledFeatureBatch:
+def collate_features(records: list[dict], *, head_config=None) -> LabeledFeatureBatch:
     """Combine whole contexts and rebase option-to-question indices."""
+    source_layers = records[0]["questions"].shape[1]
+    selected = head_config.readout_indices(source_layers) if head_config is not None else None
+    if any(r[key].shape[1] != source_layers for r in records for key in ("questions", "options")):
+        raise ValueError("Cache records have inconsistent feature layer counts")
+
+    def combine(key):
+        # Slice each record before concatenation: never allocate a full-axis batch.
+        return torch.cat([
+            r[key] if selected is None else r[key][:, selected, :]
+            for r in records
+        ])
+
     offset = 0
     links, context_links = [], []
     for context, record in enumerate(records):
@@ -77,14 +91,16 @@ def collate_features(records: list[dict]) -> LabeledFeatureBatch:
 
     return LabeledFeatureBatch(
         features=FeatureBatch(
-            questions=torch.cat([r["questions"] for r in records]),
-            options=torch.cat([r["options"] for r in records]),
+            questions=combine("questions"),
+            options=combine("options"),
             option_to_question=torch.cat(links),
             question_to_context=torch.cat(context_links),
             contexts=contexts,
             question_ids=flatten("question_ids"),
             option_ids=flatten("option_ids"),
             metadata=records[0]["feature_metadata"],
+            layer_indices=selected,
+            source_num_layers=source_layers if selected is not None else None,
         ),
         targets=torch.cat([r["targets"] for r in records]),
         context_ids=[r["context_id"] for r in records],
@@ -176,12 +192,17 @@ class FeatureDataset(IterableDataset):
             )
             # Skipped source contexts are progress metadata, never training rows.
             records = payload["records"] if isinstance(payload, dict) else payload
-            for record in records:
-                # Contexts share the shard file, so torch.load still reads them.
-                # Dropping references here prevents transfer to workers' batches/GPU.
+            external = payload.get("context_files") if isinstance(payload, dict) else None
+            contexts = (
+                load_contexts(self.root / part["file"], external, self.context_layer, records)
+                if self.include_context and external is not None and records else None
+            )
+            for index, record in enumerate(records):
                 by_layer = record.pop("contexts_by_layer", None)
                 if not self.include_context:
                     record["context"] = None
+                elif contexts is not None:
+                    record["context"] = contexts[index]
                 elif by_layer is not None:
                     if self.context_layer not in by_layer:
                         raise ValueError("A cache record is missing the requested context layer")
@@ -192,6 +213,7 @@ class FeatureDataset(IterableDataset):
                     raise ValueError("A cache record is missing requested context features")
                 record["feature_metadata"] = self.feature_metadata
                 del by_layer
+            del contexts
             if self.shuffle:
                 rng.shuffle(records)
             yield from records
@@ -209,7 +231,7 @@ def make_loader(cache, split, context, batch_size, seed, shuffle=False, *, conte
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        collate_fn=collate_features,
+        collate_fn=partial(collate_features, head_config=head_config),
         num_workers=0,
         generator=generator,
     )

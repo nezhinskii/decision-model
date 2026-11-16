@@ -61,8 +61,10 @@ final). Without an explicit depth, the deepest depth actually used by the head
 readout is selected; `last` uses only its last selected index. Missing depths fail
 at loader creation, without falling back to another depth. The selection is saved
 in the run config/provenance and restored during evaluation. Only the selected
-context is collated/transferred to GPU. Entire shard files are still read on CPU,
-so storing multiple depths increases disk use and transient RAM; use smaller shards.
+context is read, collated and transferred to GPU. New caches store small feature
+shards separately from each context depth (`part-00000.context-24.pt`, etc.).
+A head without context opens only the feature shard. Multiple depths still increase
+disk use, but unused context files are not read during training.
 
 For the older single-context format, `--pooling.include-context` stores one depth,
 by default the deepest pooled depth; `--pooling.context-layer` selects another
@@ -164,3 +166,38 @@ from feature tensors, and layer numbers remain in `features.metadata`.
 Completed older caches with a null model revision remain readable and are not
 rewritten. Resuming an unfinished Hub cache with unknown revision requires an
 explicit original commit SHA; no current remote revision is guessed for it.
+
+
+## Split context storage in an existing cache
+
+Stop readers/writers of that cache, then run:
+
+```powershell
+uv run python -m src.features.split_contexts `
+  --cache artifacts/features/qwen35_mid_context18_20_24_v3
+```
+
+This CPU-only command rewrites one existing shard at a time: its context tensors
+are written to sibling files per depth, then the original shard is atomically
+replaced by the smaller features/labels/skips payload with references to those files.
+Before publishing that replacement, the original shard remains intact. Re-running
+the command skips converted shards and continues interrupted work. No model,
+tokenization or feature recomputation is involved. Conversion needs temporary disk
+space for the current shard's extracted contexts before its original file is replaced.
+
+The manifest bytes, shard boundaries, record order, tensor values and cache path
+remain unchanged. Existing cache identity checks and checkpoint resume therefore
+continue to work; do not rename the cache or runs. Old monolithic caches remain
+readable, and partially converted caches can also be read after conversion stops.
+Keep the same experiment prefix when resuming the existing training queue.
+
+
+When `make_loader` receives a head config (training and cached-head evaluation),
+collation selects the actual question/option layers on CPU before concatenation,
+GPU transfer, dtype conversion and input projection. For `last`, only the last
+selected layer is retained. The batch carries normalized source-axis indices and
+its original layer count, so the head keeps the same config, parameter shapes and
+checkpoint layout. Projection/normalization still precede layer mixing. GPU GEMM
+shapes change, so bit-identical floating-point results are not promised.
+Unselected pooled layers remain in the shard on disk and are deserialized on CPU;
+they are not included in the collated batch. Context depth selection is independent.

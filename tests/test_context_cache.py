@@ -40,11 +40,13 @@ def test_context_storage_and_selection_are_independent_of_pooled_layers(multi_ca
     assert manifest['features']['context_layers'] == [1, 2]
     raw = torch.load(root / 'train/part-00000.pt', weights_only=True)['records'][0]
     assert raw['context'] is None
-    assert set(raw['contexts_by_layer']) == {1, 2}
+    payload = torch.load(root / 'train/part-00000.pt', weights_only=True)
+    assert set(payload['context_files']) == {1, 2}
     assert raw['questions'].shape[1] == 1
     for layer in (1, 2):
         records = list(FeatureDataset(root, 'train', include_context=True, context_layer=layer))
-        torch.testing.assert_close(records[0]['context'], raw['contexts_by_layer'][layer])
+        stored = torch.load(root / 'train' / payload['context_files'][layer], weights_only=True)
+        torch.testing.assert_close(records[0]['context'], stored['contexts'][0])
         assert 'contexts_by_layer' not in records[0]
         assert records[0]['feature_metadata']['context_layer'] == layer
     without = list(FeatureDataset(root, 'train'))
@@ -76,9 +78,11 @@ def test_missing_per_record_context_is_rejected(multi_cache):
     _, root = multi_cache
     path = root / 'train/part-00000.pt'
     payload = torch.load(path, weights_only=True)
-    del payload['records'][0]['contexts_by_layer'][1]
-    torch.save(payload, path)
-    with pytest.raises(ValueError, match='missing the requested context layer'):
+    context_path = path.parent / payload['context_files'][1]
+    contexts = torch.load(context_path, weights_only=True)
+    contexts['contexts'][0] = None
+    torch.save(contexts, context_path)
+    with pytest.raises(ValueError, match='missing context layer'):
         list(FeatureDataset(root, 'train', include_context=True, context_layer=1))
 
 

@@ -40,6 +40,8 @@ class LayerReadout(nn.Module):
         self.mode = ReadoutMode(mode)
         self.indices = resolve_layer_indices(num_layers, indices)
         self.num_layers = num_layers
+        used = self.indices[-1:] if self.mode == ReadoutMode.last else self.indices
+        self.active_indices = tuple(i % num_layers for i in used)
         count = len(self.indices)
         self.logits = (
             nn.Parameter(torch.zeros(count))
@@ -53,13 +55,19 @@ class LayerReadout(nn.Module):
             )
 
     def forward(self, features: FeatureBatch):
-        if (
-            features.questions.shape[1] != self.num_layers
-            or features.options.shape[1] != self.num_layers
-        ):
-            raise ValueError("Feature layer count differs from head construction")
-        q = features.questions[:, self.indices, :]  # [Q, R_selected, d]
-        o = features.options[:, self.indices, :]  # [V, R_selected, d]
+        if features.layer_indices is not None:
+            if (features.source_num_layers != self.num_layers
+                    or features.layer_indices != self.active_indices
+                    or features.questions.shape[1] != len(self.active_indices)
+                    or features.options.shape[1] != len(self.active_indices)):
+                raise ValueError("Preselected feature layers differ from head readout")
+            q, o = features.questions, features.options
+        else:
+            if (features.questions.shape[1] != self.num_layers
+                    or features.options.shape[1] != self.num_layers):
+                raise ValueError("Feature layer count differs from head construction")
+            q = features.questions[:, self.indices, :]
+            o = features.options[:, self.indices, :]
         if self.mode == ReadoutMode.last:
             return q[:, -1], o[:, -1]
         if self.mode == ReadoutMode.mean:

@@ -137,3 +137,10 @@ When omitted, `context_depth` chooses the deepest depth actually used by the rea
 `last` uses only the last selected axis index. Both live models and multilayer-context
 cache loaders use this rule. Legacy single-context caches retain their original memory
 by default. Changing head context depth does not add trainable parameters.
+
+
+Cached batches can carry `layer_indices` and `source_num_layers` after CPU collation.
+These describe the original feature axis; they do not change model construction or
+checkpoint parameters. `LayerReadout` validates this selection and consumes it
+without selecting again. Ordinary full-axis batches, including live LoRA inputs,
+continue to use the usual selection inside the readout.

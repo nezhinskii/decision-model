@@ -38,6 +38,13 @@ class HeadConfig:
     router_dim: int = 128
     norm_type: NormType = NormType.layernorm
 
+    def readout_indices(self, num_layers):
+        """Actual used indices in the original feature axis, normalized to nonnegative."""
+        indices = resolve_layer_indices(num_layers, self.layer_indices)
+        if self.readout == "last":
+            indices = indices[-1:]
+        return tuple(i % num_layers for i in indices)
+
     def context_depth(self, layers, final_depth):
         """Shared live/cache policy; context_layer is a decoder depth, not an axis index."""
         if self.context_layer is not None:
@@ -45,10 +52,7 @@ class HeadConfig:
             if depth is None or depth < 1:
                 raise ValueError("context_layer needs a positive depth, or -1 with known final depth")
             return depth
-        indices = resolve_layer_indices(len(layers), self.layer_indices)
-        if self.readout == "last":
-            indices = indices[-1:]
-        return max(layers[i] for i in indices)
+        return max(layers[i] for i in self.readout_indices(len(layers)))
 
     @property
     def requires_context(self) -> bool:

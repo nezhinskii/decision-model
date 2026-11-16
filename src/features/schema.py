@@ -21,6 +21,10 @@ class FeatureBatch:
     question_ids: list[str]  # Q IDs, aligned with questions.
     option_ids: list[str]  # V IDs, aligned with options; not globally unique alone.
     metadata: dict
+    # CPU collation may select/reorder the original cached axis before transfer.
+    # None preserves the ordinary full-axis input used by live models/old callers.
+    layer_indices: tuple[int, ...] | None = None
+    source_num_layers: int | None = None
 
     def to(self, device: str | torch.device) -> "FeatureBatch":
         """Move head inputs, preserving dtype and autograd connections."""

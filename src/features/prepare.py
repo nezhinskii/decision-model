@@ -20,6 +20,7 @@ from ..backbone.loading import BackboneConfig
 from ..backbone.frozen import FrozenBackbone
 from ..data.dataset import read_examples
 from .cache import cache_records
+from .storage import write_shard
 
 
 @dataclass
@@ -312,12 +313,10 @@ def prepare(config: PrepareConfig) -> Path:
                             del pooled_output
                     progress.update(len(chunk))
                 path = destination / split / f"part-{len(info['parts']):05d}.pt"
-                temporary = path.with_suffix(".pt.tmp")
-                # Store skips in the same atomic file as features, including an
-                # all-skipped shard, so recovery preserves the exact source cursor.
+                # Publish features/skips atomically after separate context files.
+                # Empty shards still preserve the source cursor for recovery.
                 payload = {"records": records, "skipped": skipped}
-                torch.save(payload, temporary)
-                temporary.replace(path)
+                write_shard(path, payload, manifest["features"] or {})
                 register_part(path, payload)
                 del payload
                 progress.set_postfix(
