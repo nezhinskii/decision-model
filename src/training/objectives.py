@@ -27,8 +27,11 @@ class LossConfig:
     brier_weight: float = 0.0
     label_smoothing: float = 0.0
     smoothing_scope: SmoothingScope = SmoothingScope.both
+    balance_weight: float = 0.0
 
     def __post_init__(self):
+        if not math.isfinite(self.balance_weight) or self.balance_weight < 0:
+            raise ValueError("balance_weight must be finite and nonnegative")
         if (
             not all(
                 math.isfinite(w) and w >= 0 for w in (self.ce_weight, self.brier_weight)
@@ -41,6 +44,11 @@ class LossConfig:
         if not 0 <= self.label_smoothing < 1:
             raise ValueError("label_smoothing must be in [0, 1)")
         self.smoothing_scope = SmoothingScope(self.smoothing_scope)
+
+
+def routing_balance_sum(probability_sums, load_fraction):
+    """Sum over options using the same historical load throughout this step."""
+    return load_fraction.numel() * torch.dot(probability_sums, load_fraction.float())
 
 
 TRAIN_METRIC_NAMES = (

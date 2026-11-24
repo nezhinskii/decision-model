@@ -299,3 +299,21 @@ def test_live_head_context_override_matches_cached_head_policy(live_setup):
     conflicting = replace(settings, pooling=replace(settings.pooling, context_layer=1))
     with pytest.raises(ValueError, match='disagree'):
         load_decision(conflicting)
+
+
+@pytest.mark.parametrize("processor", ["question_option_dense", "question_option_moe"])
+def test_question_option_heads_live_forward(live_setup, processor):
+    config, _ = live_setup
+    settings = replace(config.model, head=replace(
+        config.model.head, processor=processor, num_experts=3, experts_per_option=2,
+    ))
+    model = load_decision(settings).eval()
+    batch = next(iter(make_decision_loader(dataset_for(config), 1)))
+    logits = model(batch.inputs)
+    if processor == "question_option_moe":
+        routed, _, counts = model(batch.inputs, return_routing=True)
+        torch.testing.assert_close(routed, logits)
+        assert counts.sum() == 2 * logits.numel()
+    logits.square().sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for name, p in model.decoder.named_parameters() if "lora_B" in name)

@@ -6,6 +6,7 @@ from enum import StrEnum
 from torch import nn
 
 from ..features.schema import FeatureBatch
+from .moe import QuestionOptionProcessor
 from .projection import InputProjection
 from .processors import IdentityProcessor, JointProcessor, SeparateMLPProcessor
 from .scorers import PointerScorer
@@ -17,6 +18,8 @@ class ProcessorType(StrEnum):
     identity = "identity"
     mlp = "mlp"
     joint = "joint"
+    question_option_dense = "question_option_dense"
+    question_option_moe = "question_option_moe"
 
 
 @dataclass
@@ -37,6 +40,8 @@ class HeadConfig:
     context_layer: int | None = None  # Actual decoder depth; None follows readout, -1 means final.
     router_dim: int = 128
     norm_type: NormType = NormType.layernorm
+    num_experts: int = 8
+    experts_per_option: int = 2
 
     def readout_indices(self, num_layers):
         """Actual used indices in the original feature axis, normalized to nonnegative."""
@@ -75,8 +80,19 @@ class DecisionHead(nn.Module):
     def requires_context(self) -> bool:
         return self.processor.requires_context
 
-    def forward(self, features: FeatureBatch):
+    @property
+    def routing_processor(self):
+        if isinstance(self.processor, QuestionOptionProcessor) and self.processor.router is not None:
+            return self.processor
+        return None
+
+    def forward(self, features: FeatureBatch, *, return_routing=False):
         projected = self.projection(features)
+        if return_routing:
+            if self.routing_processor is None:
+                raise ValueError("Routing statistics require a routed processor")
+            states, probabilities, counts = self.processor(projected, return_routing=True)
+            return self.scorer(states, projected.option_to_question), probabilities, counts
         states = self.processor(projected)
         return self.scorer(states, projected.option_to_question)
 
@@ -108,6 +124,13 @@ def build_head(
             config.dropout,
             readout,
             config.norm_type,
+        )
+    elif config.processor in {"question_option_dense", "question_option_moe"}:
+        routed = config.processor == "question_option_moe"
+        processor = QuestionOptionProcessor(
+            readout, config.dim, config.hidden_dim, config.dropout, config.norm_type,
+            num_experts=config.num_experts if routed else 1,
+            experts_per_option=config.experts_per_option if routed else 1, routed=routed,
         )
     elif config.processor == "joint":
         if config.attention_heads < 1 or config.dim % config.attention_heads:

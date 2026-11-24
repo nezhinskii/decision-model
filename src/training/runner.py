@@ -237,12 +237,20 @@ def run_training(config: TrainingConfig, prepare: Callable) -> Path:
                     return
                 # One device-to-host transfer per interval completes these metrics.
                 # Wall time includes loading/CPU work; no explicit CUDA synchronize.
-                averages = (interval_sums / interval_questions).cpu().tolist()
+                raw = interval_sums.cpu().tolist()
+                metric_count = len(TRAIN_METRIC_NAMES)
+                averages = [value / interval_questions for value in raw[:metric_count]]
                 elapsed = time.perf_counter() - started
                 metrics = {
                     f"train/{key}": value
                     for key, value in zip(TRAIN_METRIC_NAMES, averages)
                 }
+                if len(raw) > metric_count:
+                    options, balance_sum, *assignments = raw[metric_count:]
+                    metrics["train/routing/balance_loss"] = balance_sum / options
+                    total = sum(assignments)
+                    for i, count in enumerate(assignments):
+                        metrics[f"train/routing/expert_{i}_fraction"] = count / total
                 metrics.update(
                     {
                         "train/learning_rate": used_lr,

@@ -13,6 +13,10 @@ from ..utils.files import file_hash
 
 def model_signature(model):
     settings = asdict(model.settings)
+    # Preserve signatures of pre-MoE models; routing settings only affect MoE.
+    if settings["head"]["processor"] != "question_option_moe":
+        settings["head"].pop("num_experts")
+        settings["head"].pop("experts_per_option")
     # Placement and download location may change when evaluating a saved model.
     for key in ("device", "cache_dir", "local_files_only"):
         settings["backbone"].pop(key, None)

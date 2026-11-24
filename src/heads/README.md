@@ -144,3 +144,27 @@ These describe the original feature axis; they do not change model construction 
 checkpoint parameters. `LayerReadout` validates this selection and consumes it
 without selecting again. Ordinary full-axis batches, including live LoRA inputs,
 continue to use the usual selection inside the readout.
+
+## Question–option dense and MoE controls
+
+Both processors combine the projected question and option, apply a one-hidden-layer
+MLP update to the option with a normalized residual, and use the shared Pointer.
+They work with cached or live features and do not request context tokens.
+
+| Processor | Settings for a compute-matched pilot |
+|---|---|
+| `question_option_dense` | One MLP with `hidden_dim=2048` |
+| `question_option_moe` | `num_experts=8`, `experts_per_option=2`, `hidden_dim=1024` per expert |
+
+Use identical input, readout, head and score dimensions in both arms. For cached
+training the processor flag is `--head.processor`; for live training it is
+`--model.head.processor`. Use the same prefix for the other head fields.
+For the MoE pilot set `--loss.balance-weight 0.01` (default 0).
+Top-K weights are normalized over selected experts for K > 1. With K = 1
+the selected expert keeps its full-router probability so the gate receives a gradient.
+
+Routing load is the fraction of all option assignments, aggregated across the
+optimizer step. Each successful update blends 10% of that step's load into the
+historical fractions saved in the head checkpoint. Training logs the unweighted
+balance loss and assignment fractions under `train/routing/`. Validation reports
+assignment fractions and uses the ordinary decision metrics for checkpoint selection.

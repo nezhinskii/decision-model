@@ -114,7 +114,11 @@ class DecisionModel(nn.Module):
             self.decoder.eval()
         return self
 
-    def forward(self, batch):
+    @property
+    def routing_processor(self):
+        return self.head.routing_processor
+
+    def forward(self, batch, *, return_routing=False):
         if batch.config != self.settings.inputs:
             raise ValueError(
                 "Packed inputs differ from the decision model configuration"
@@ -130,7 +134,7 @@ class DecisionModel(nn.Module):
                 "dtype": self.settings.backbone.dtype,
             },
         )
-        return self.head(extract_features(output, batch, self.pooling))
+        return self.head(extract_features(output, batch, self.pooling), return_routing=return_routing)
 
 
 def load_decision(
